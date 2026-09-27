@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-09-27
+
 ### Fixed
 
 - **Hole punching works behind routers that do not keep ports.** Many
@@ -18,7 +20,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now asked from the QUIC socket itself, and the port the router gave it
   is what goes out for QUIC. The query is repeated every 15 seconds, which
   keeps the router from forgetting the mapping while a sender waits, and
-  catches it if the port moves anyway.
+  catches it if the port moves anyway. Each peer offers its own address,
+  so every peer behind such a router needs this version.
 - Dependabot's Go module runs failed: the Go proxy lists an old
   go-libp2p tag as `v6.0.23+incompatible`, Dependabot took it for the
   newest release, and it cannot be resolved. Versions of go-libp2p from 2
