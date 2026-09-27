@@ -24,8 +24,10 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	relayclient "github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/client"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
+	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
+	"go.uber.org/fx"
 )
 
 const (
@@ -187,8 +189,8 @@ type Node struct {
 	punch   *punchWatcher
 	events  chan Event
 
-	// publicIP holds the external WAN IPv4 address discovered via STUN.
-	publicIP atomic.Pointer[net.IP]
+	// public is what STUN has told us about our address on the internet.
+	public *publicAddress
 
 	// claimed guards the one-transfer-per-room rule: it is set when a
 	// receiver that proved the code takes the room, and cleared again if
@@ -282,38 +284,13 @@ func New(ctx context.Context, serverAddrs []string, opts ...Option) (*Node, erro
 		return nil, err
 	}
 
-	var pubIP *net.IP
 	stunServers := o.stunServers
 	if len(stunServers) == 0 {
 		stunServers = DefaultSTUNServers
 	}
-	stunCtx, stunCancel := context.WithTimeout(ctx, 3500*time.Millisecond)
-	if ip, err := ResolvePublicIP(stunCtx, stunServers); err == nil && ip != nil {
-		pubIP = &ip
-	}
-	stunCancel()
 
-	addrsFactory := func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-		var result []multiaddr.Multiaddr
-		for _, a := range addrs {
-			// Skip Docker container bridge networks (172.16.0.0/12) which
-			// bloat the multiaddr list and push useful addrs past MaxAddrs.
-			if isDockerAddr(a) {
-				continue
-			}
-			result = append(result, a)
-
-			// If we have a STUN-discovered public IP, synthesize public multiaddrs
-			// from local LAN / interface bindings.
-			if pubIP != nil {
-				if pubMA, ok := injectPublicIP(a, *pubIP); ok {
-					result = append(result, pubMA)
-				}
-			}
-		}
-		return multiaddr.Unique(result)
-	}
-
+	public := new(publicAddress)
+	var quicConns *quicreuse.ConnManager
 	punch := newPunchWatcher()
 	h, err := libp2p.New(
 		// DCUtR (hole punching): upgrades a relayed connection to a
@@ -323,18 +300,31 @@ func New(ctx context.Context, serverAddrs []string, opts ...Option) (*Node, erro
 		libp2p.EnableAutoNATv2(),
 		// Ask the router to forward a port if it speaks UPnP/NAT-PMP.
 		libp2p.NATPortMap(),
-		// Filter out useless virtual docker addresses and inject STUN-discovered public IP
-		libp2p.AddrsFactory(addrsFactory),
+		// Filter out useless virtual docker addresses and advertise the
+		// public ones STUN finds.
+		libp2p.AddrsFactory(public.rewrite),
+		// Hand us the QUIC transport's sockets, so STUN can be asked from
+		// the one a hole punch goes out through.
+		libp2p.WithFxOption(fx.Populate(&quicConns)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("could not start the network layer: %w", err)
 	}
+
+	// The meeting point sits behind a tunnel, so it cannot tell us what
+	// our address looks like from outside; without that, hole punching has
+	// nothing to offer the other side. STUN can, and asked from the QUIC
+	// socket it also gives the port the router picked for it.
+	stunCtx, stunCancel := context.WithTimeout(ctx, stunBudget)
+	quicConn := public.discover(stunCtx, h, quicConns, stunServers)
+	stunCancel()
 
 	nodeCtx, cancel := context.WithCancel(context.Background())
 	n := &Node{
 		host:       h,
 		servers:    infos,
 		punch:      punch,
+		public:     public,
 		events:     make(chan Event, 64),
 		handshakes: make(chan struct{}, handshakeSlots),
 		lost:       make(chan struct{}, 1),
@@ -342,8 +332,8 @@ func New(ctx context.Context, serverAddrs []string, opts ...Option) (*Node, erro
 		cancel:     cancel,
 		done:       make(chan struct{}),
 	}
-	if pubIP != nil {
-		n.publicIP.Store(pubIP)
+	if quicConn != nil {
+		go n.keepMapping(quicConn, stunServers, mappingRefresh)
 	}
 
 	server, err := n.connectAny(ctx, infos)
@@ -428,10 +418,34 @@ func (n *Node) ID() peer.ID { return n.host.ID() }
 // PublicIP returns this node's external WAN IP discovered via STUN, or nil
 // if discovery failed or was not possible.
 func (n *Node) PublicIP() net.IP {
-	if ip := n.publicIP.Load(); ip != nil {
-		return *ip
+	if n.public == nil {
+		return nil
 	}
-	return nil
+	return n.public.IP()
+}
+
+// keepMapping asks STUN from the QUIC socket every so often until the node
+// closes, then closes the socket. A sender can sit on its code for
+// many minutes, and a router forgets an idle mapping in less than one: the
+// port a hole punch would offer the other side would then lead nowhere.
+// Each query keeps the mapping alive, and if it moves anyway, the address
+// factory follows. A query that fails changes nothing.
+func (n *Node) keepMapping(conn net.PacketConn, servers []string, every time.Duration) {
+	defer func() { _ = conn.Close() }()
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-n.done:
+			return
+		case <-tick.C:
+		}
+		ctx, cancel := context.WithTimeout(n.ctx, stunBudget)
+		if addr, err := stunMapping(ctx, conn, servers); err == nil {
+			n.public.setQUIC(addr)
+		}
+		cancel()
+	}
 }
 
 // Addrs returns the multiaddrs this node is listening on and advertising.

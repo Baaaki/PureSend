@@ -2,18 +2,31 @@ package p2p
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p/p2p/transport/quicreuse"
 	"github.com/multiformats/go-multiaddr"
 	"github.com/pion/stun/v4"
+	"go.uber.org/fx"
 )
 
 // startMockSTUNServer starts a local UDP server that answers RFC 5389
 // Binding Requests with an XOR-MAPPED-ADDRESS attribute pointing to targetIP.
 func startMockSTUNServer(t *testing.T, targetIP net.IP) (string, func()) {
+	t.Helper()
+	return startNATSTUNServer(t, targetIP, new(atomic.Int32))
+}
+
+// startNATSTUNServer is startMockSTUNServer behind a router that does not
+// keep ports: it answers that a query from port p came from port p+shift,
+// the way a router that picks its own port for each socket would.
+func startNATSTUNServer(t *testing.T, targetIP net.IP, shift *atomic.Int32) (string, func()) {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
@@ -39,7 +52,7 @@ func startMockSTUNServer(t *testing.T, targetIP net.IP) (string, func()) {
 				stun.BindingSuccess,
 				&stun.XORMappedAddress{
 					IP:   targetIP,
-					Port: addr.(*net.UDPAddr).Port,
+					Port: shifted(addr.(*net.UDPAddr).Port, int(shift.Load())),
 				},
 				stun.Fingerprint,
 			)
@@ -232,5 +245,186 @@ func TestLiveNodeDiscoversPublicIPAndSynthesizesAddrs(t *testing.T) {
 	}
 	if !hasPublicAddr {
 		t.Errorf("did not find any advertised multiaddr with discovered public IP %s", pubIP)
+	}
+}
+
+// shifted is the port a router that adds shift to every port gives p.
+func shifted(p, shift int) int {
+	return (p+shift-1)%65535 + 1
+}
+
+// quicListenPort is the port a host listens on for QUIC over IPv4.
+func quicListenPort(t *testing.T, addrs []multiaddr.Multiaddr) int {
+	t.Helper()
+	for _, a := range addrs {
+		if !isQUIC4(a) {
+			continue
+		}
+		p, err := a.ValueForProtocol(multiaddr.P_UDP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var port int
+		if _, err := fmt.Sscan(p, &port); err != nil {
+			t.Fatal(err)
+		}
+		return port
+	}
+	t.Fatalf("no QUIC listener over IPv4 in %v", addrs)
+	return 0
+}
+
+func hasAddr(addrs []multiaddr.Multiaddr, want string) bool {
+	for _, a := range addrs {
+		if a.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRewrite(t *testing.T) {
+	in := []multiaddr.Multiaddr{
+		multiaddr.StringCast("/ip4/192.168.1.104/udp/45000/quic-v1"),
+		multiaddr.StringCast("/ip4/192.168.1.104/tcp/41000"),
+		multiaddr.StringCast("/ip4/192.168.1.104/udp/46000/quic-v1/webtransport"),
+		multiaddr.StringCast("/ip4/172.17.0.1/udp/45000/quic-v1"),
+		multiaddr.StringCast("/ip4/127.0.0.1/udp/45000/quic-v1"),
+	}
+	strs := func(addrs []multiaddr.Multiaddr) []string {
+		var out []string
+		for _, a := range addrs {
+			out = append(out, a.String())
+		}
+		return out
+	}
+
+	var p publicAddress
+	if got := strs(p.rewrite(in)); len(got) != 4 {
+		t.Errorf("with nothing from STUN: got %v, want the four non-Docker addresses as they are", got)
+	}
+
+	// The public IP alone: every address gets a public twin on the same port.
+	ip := net.ParseIP("188.119.40.165")
+	p.ip.Store(&ip)
+	out := p.rewrite(in)
+	for _, want := range []string{
+		"/ip4/188.119.40.165/udp/45000/quic-v1",
+		"/ip4/188.119.40.165/tcp/41000",
+		"/ip4/188.119.40.165/udp/46000/quic-v1/webtransport",
+	} {
+		if !hasAddr(out, want) {
+			t.Errorf("with the IP alone: %s missing from %v", want, strs(out))
+		}
+	}
+
+	// The QUIC socket's mapping: QUIC gets the router's port instead of
+	// ours; the others keep their guess.
+	p.setQUIC(&net.UDPAddr{IP: ip, Port: 2332})
+	out = p.rewrite(in)
+	if !hasAddr(out, "/ip4/188.119.40.165/udp/2332/quic-v1") {
+		t.Errorf("mapped QUIC address missing from %v", strs(out))
+	}
+	if hasAddr(out, "/ip4/188.119.40.165/udp/45000/quic-v1") {
+		t.Errorf("QUIC still advertised on the local port: %v", strs(out))
+	}
+	if !hasAddr(out, "/ip4/192.168.1.104/udp/45000/quic-v1") {
+		t.Errorf("the LAN address must stay for peers on the same network: %v", strs(out))
+	}
+	if !hasAddr(out, "/ip4/188.119.40.165/tcp/41000") {
+		t.Errorf("TCP guess missing from %v", strs(out))
+	}
+	for _, a := range out {
+		if isDockerAddr(a) {
+			t.Errorf("Docker address advertised: %s", a)
+		}
+	}
+}
+
+// TestNewAdvertisesTheRoutersPort is the case that sent transfers through
+// the relay: a router that gives the QUIC socket a port of its own. The
+// node must ask STUN from that socket and advertise the router's port — the
+// one a hole punch can reach — not its own.
+func TestNewAdvertisesTheRoutersPort(t *testing.T) {
+	publicIP := net.ParseIP("203.0.113.7")
+	shift := new(atomic.Int32)
+	shift.Store(1000)
+	stunAddr, stopSTUN := startNATSTUNServer(t, publicIP, shift)
+	defer stopSTUN()
+
+	server, err := libp2p.New(libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	addr := fmt.Sprintf("%s/p2p/%s", server.Addrs()[0], server.ID())
+	node, err := New(ctx, []string{addr}, WithSTUNServers([]string{stunAddr}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer node.Close()
+
+	if !node.PublicIP().Equal(publicIP) {
+		t.Errorf("PublicIP = %v, want %v", node.PublicIP(), publicIP)
+	}
+	port := quicListenPort(t, node.host.Network().ListenAddresses())
+	want := fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", publicIP, shifted(port, 1000))
+	if !hasAddr(node.Addrs(), want) {
+		t.Errorf("%s missing from %v", want, node.Addrs())
+	}
+	wrong := fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", publicIP, port)
+	if hasAddr(node.Addrs(), wrong) {
+		t.Errorf("still advertising the local port: %s", wrong)
+	}
+}
+
+// TestKeepMappingFollowsTheRouter covers a router that forgets an idle
+// mapping and gives the socket another port: the next refresh must put the
+// new port in the address list.
+func TestKeepMappingFollowsTheRouter(t *testing.T) {
+	publicIP := net.ParseIP("203.0.113.8")
+	shift := new(atomic.Int32)
+	shift.Store(7)
+	stunAddr, stopSTUN := startNATSTUNServer(t, publicIP, shift)
+	defer stopSTUN()
+
+	public := new(publicAddress)
+	var conns *quicreuse.ConnManager
+	h, err := libp2p.New(
+		libp2p.ListenAddrStrings("/ip4/127.0.0.1/udp/0/quic-v1"),
+		libp2p.AddrsFactory(public.rewrite),
+		libp2p.WithFxOption(fx.Populate(&conns)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := newTestNode(t)
+	n.host.Close()
+	n.host, n.public = h, public
+	defer n.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), stunBudget)
+	conn := public.discover(ctx, h, conns, []string{stunAddr})
+	cancel()
+	if conn == nil {
+		t.Fatal("no mapping found from the QUIC socket")
+	}
+	port := quicListenPort(t, h.Network().ListenAddresses())
+	if got := public.quic.Load(); got == nil || got.Port != shifted(port, 7) {
+		t.Fatalf("mapping = %v, want port %d", got, shifted(port, 7))
+	}
+
+	shift.Store(9)
+	go n.keepMapping(conn, []string{stunAddr}, 20*time.Millisecond)
+	want := fmt.Sprintf("/ip4/%s/udp/%d/quic-v1", publicIP, shifted(port, 9))
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasAddr(h.Addrs(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never showed up in %v", want, h.Addrs())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
