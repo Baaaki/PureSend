@@ -2,7 +2,7 @@
 # Contributor: PureSend Contributors
 
 pkgname=puresend-bin
-pkgver=2.0.4
+pkgver=2.0.5
 pkgrel=1
 pkgdesc="End-to-end encrypted peer-to-peer file transfer for the terminal (libp2p)"
 arch=('x86_64')
@@ -16,7 +16,7 @@ conflicts=('puresend')
 source_x86_64=("puresend-${pkgver}-x86_64.tar.gz::https://github.com/Baaaki/PureSend/releases/download/v${pkgver}/puresend_${pkgver}_linux_x86_64.tar.gz"
                "puresend.desktop"
                "puresend.svg")
-sha256sums_x86_64=('eac2b53122a282a4e5832118f692e1742ad88e680530d9f0ed0a1be328c6852b'
+sha256sums_x86_64=('9e8b8b7494c3825a8e315a3af2f8b60ab8b19f5b798ed412d7d7490b7020e9dc'
                    'SKIP'
                    'SKIP')
 
