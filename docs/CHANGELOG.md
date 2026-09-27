@@ -8,10 +8,30 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Hole punching works behind routers that do not keep ports.** Many
+  home routers give an outgoing socket a port of their own — local port
+  60982 goes out as 2332 — and keep it for every destination, which hole
+  punching can work with. But a peer told the other side its public IP
+  with its *local* port, since STUN was asked from a throwaway socket and
+  only its IP was used. The other side punched towards a port nobody was
+  on, every attempt failed, and transfers went through the relay. STUN is
+  now asked from the QUIC socket itself, and the port the router gave it
+  is what goes out for QUIC. The query is repeated every 15 seconds, which
+  keeps the router from forgetting the mapping while a sender waits, and
+  catches it if the port moves anyway.
 - Dependabot's Go module runs failed: the Go proxy lists an old
   go-libp2p tag as `v6.0.23+incompatible`, Dependabot took it for the
   newest release, and it cannot be resolved. Versions of go-libp2p from 2
   up are now ignored; all of them are those pre-module tags.
+
+### Added
+
+- `make test-holepunch` (`test/holepunch/netns-holepunch-test.sh`), run by
+  CI: two peers behind routers that move ports, built from network
+  namespaces, with the meeting point behind a proxy as it is behind
+  Cloudflare in production. The receiver must connect directly and the
+  relay must not carry the files. 2.0.4 fails it; with routers that keep
+  ports, both versions pass.
 
 ## [2.0.4] - 2026-09-23
 
