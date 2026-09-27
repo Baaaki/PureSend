@@ -72,6 +72,10 @@ test-short:
 test-relay: $(BIN)/puresend $(BIN)/puresend-server
 	FT_BIN_DIR=$(CURDIR)/$(BIN) unshare -Urnm --map-root-user ./test/relay/netns-relay-test.sh
 
+## test-holepunch: prove two peers behind routers that move ports connect directly
+test-holepunch: $(BIN)/puresend $(BIN)/puresend-server
+	FT_BIN_DIR=$(CURDIR)/$(BIN) unshare -Urnm --map-root-user ./test/holepunch/netns-holepunch-test.sh
+
 ## cover: coverage of the whole suite, the built client binary included
 # -coverpkg counts code in every package, whichever package's tests reach
 # it: most of p2p runs only under the integration tests. The client binary
@@ -138,5 +142,5 @@ deb:
 clean:
 	rm -rf $(BIN) coverage.out
 
-.PHONY: help build test test-short test-relay cover bench bench-e2e vet lint vuln fmt tidy dev docker deb clean
+.PHONY: help build test test-short test-relay test-holepunch cover bench bench-e2e vet lint vuln fmt tidy dev docker deb clean
 

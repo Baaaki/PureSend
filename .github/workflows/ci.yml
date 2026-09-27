@@ -101,6 +101,15 @@ jobs:
           fi
       - name: Relay fallback over isolated networks
         run: make test-relay
+      # The routers in the hole punching test are nftables and iptables
+      # rules inside the namespaces; the kernel modules they need cannot
+      # be loaded from in there.
+      - name: Prepare the hole punching test's routers
+        run: |
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+          sudo modprobe -a nf_tables nft_chain_nat nf_nat nf_conntrack xt_MASQUERADE xt_conntrack
+      - name: Hole punching through routers that move ports
+        run: make test-holepunch
 
   docker:
     runs-on: ubuntu-26.04
