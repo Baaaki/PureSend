@@ -71,8 +71,18 @@ const (
 	MaxWrongCodes = 3
 )
 
-// errRoomExpired ends a room that could not be put back in time.
-var errRoomExpired = errors.New("the room code expired")
+// ErrRoomExpired ends a room that could not be put back in time.
+var ErrRoomExpired = errors.New("the room code expired")
+var errRoomExpired = ErrRoomExpired
+
+// ErrRendezvousUnreachable is returned when the node cannot connect to any rendezvous server.
+var ErrRendezvousUnreachable = errors.New("could not reach the meeting point")
+
+// ErrPeerUnreachable is returned when the node cannot connect to the other computer.
+var ErrPeerUnreachable = errors.New("could not connect to the other computer")
+
+// ErrRelayLimitExceeded is returned when the transfer exceeds the relay bandwidth quota.
+var ErrRelayLimitExceeded = errors.New("transfer exceeded relay size limit")
 
 // ErrTooManyWrongCodes ends a room that has seen MaxWrongCodes handshakes
 // with a wrong code. Nothing was shown to any of them; the words are simply
@@ -393,7 +403,7 @@ func (n *Node) connectAny(ctx context.Context, infos []peer.AddrInfo) (peer.Addr
 		}
 		errs = append(errs, err)
 	}
-	return peer.AddrInfo{}, fmt.Errorf("could not reach the meeting point: %w", errors.Join(errs...))
+	return peer.AddrInfo{}, fmt.Errorf("%w: %w", ErrRendezvousUnreachable, errors.Join(errs...))
 }
 
 // currentServer is the meeting point in use.
@@ -931,7 +941,7 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	dialCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	if err := n.host.Connect(dialCtx, *sender); err != nil {
-		return nil, fmt.Errorf("could not connect to the other computer: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrPeerUnreachable, err)
 	}
 
 	// The first connection usually arrives through the relay; DCUtR then

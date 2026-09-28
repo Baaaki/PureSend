@@ -22,6 +22,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -32,10 +33,24 @@ import (
 	"puresend/internal/headless"
 	"puresend/internal/i18n"
 	"puresend/internal/p2p"
+	"puresend/internal/rendezvous"
+	"puresend/internal/transfer"
 	"puresend/internal/tui"
 	"puresend/internal/update"
 
 	"github.com/charmbracelet/x/term"
+)
+
+// Standard exit codes for PureSend CLI.
+const (
+	ExitCodeSuccess  = 0
+	ExitCodeGeneral  = 1
+	ExitCodeUsage    = 2 // Invalid flags, unexpected arguments, file not found locally, bad room code format
+	ExitCodeNetwork  = 3 // Rendezvous unreachable, peer unreachable, connection dropped
+	ExitCodeAuth     = 4 // Room code does not match, too many wrong attempts, code expired, room not found
+	ExitCodeIO       = 5 // Disk full, permission denied, checksum mismatch
+	ExitCodeCanceled = 6 // Transfer declined by user
+	ExitCodeSignal   = 130 // Interrupted by SIGINT/Ctrl+C
 )
 
 // Build information, filled in at build time with -ldflags -X. Releases
@@ -78,7 +93,7 @@ func main() {
 		lang := i18n.Normalize(userLang)
 		if err := update.Apply(version, lang, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", i18n.Get(lang).UpdateFailed, err)
-			os.Exit(1)
+			os.Exit(ExitCodeGeneral)
 		}
 		return
 	}
@@ -95,6 +110,46 @@ func main() {
 			fmt.Printf("  list:    %s\n", defaultServerList)
 		}
 		return
+	}
+
+	// Detect unexpected positional arguments early to help users who forget flag dashes.
+	if flag.NArg() > 0 {
+		args := flag.Args()
+		if i18n.Normalize(userLang) == i18n.EN {
+			fmt.Fprintf(os.Stderr, "Error: Unexpected arguments: %s\n", strings.Join(args, " "))
+			fmt.Fprintln(os.Stderr, "Flags must begin with a dash (-). For example: puresend -send <file> or puresend -receive <code>")
+		} else {
+			fmt.Fprintf(os.Stderr, "Hata: Beklenmeyen argümanlar algılandı: %s\n", strings.Join(args, " "))
+			fmt.Fprintln(os.Stderr, "Bayraklar tire (-) ile başlamalıdır. Örneğin: puresend -send <dosya> veya puresend -receive <kod>")
+		}
+		os.Exit(ExitCodeUsage)
+	}
+
+	if *send != "" && *receive != "" {
+		if i18n.Normalize(userLang) == i18n.EN {
+			fmt.Fprintln(os.Stderr, "Error: -send and -receive cannot be used together.")
+		} else {
+			fmt.Fprintln(os.Stderr, "Hata: -send ve -receive aynı anda kullanılamaz.")
+		}
+		os.Exit(ExitCodeUsage)
+	}
+
+	if *send != "" && *yes {
+		if i18n.Normalize(userLang) == i18n.EN {
+			fmt.Fprintln(os.Stderr, "Error: -yes is only valid with -receive.")
+		} else {
+			fmt.Fprintln(os.Stderr, "Hata: -yes yalnızca -receive ile birlikte kullanılabilir.")
+		}
+		os.Exit(ExitCodeUsage)
+	}
+
+	if *send != "" && *out != "" {
+		if i18n.Normalize(userLang) == i18n.EN {
+			fmt.Fprintln(os.Stderr, "Error: -out is used for downloading files (-receive), not sending.")
+		} else {
+			fmt.Fprintln(os.Stderr, "Hata: -out yalnızca dosya indirme (-receive) için kullanılır, gönderim için değil.")
+		}
+		os.Exit(ExitCodeUsage)
 	}
 
 	servers := p2p.SplitServers(*server)
@@ -114,16 +169,7 @@ func main() {
 			fmt.Fprintln(os.Stderr)
 			fmt.Fprintln(os.Stderr, "  puresend -server /dns4/<alan-adi>/tcp/443/tls/ws/p2p/<PeerID>")
 		}
-		os.Exit(1)
-	}
-
-	if *send != "" && *receive != "" {
-		if i18n.Normalize(userLang) == i18n.EN {
-			fmt.Fprintln(os.Stderr, "-send and -receive cannot be used together.")
-		} else {
-			fmt.Fprintln(os.Stderr, "-send ve -receive aynı anda kullanılamaz.")
-		}
-		os.Exit(1)
+		os.Exit(ExitCodeUsage)
 	}
 
 	outDir := *out
@@ -140,9 +186,9 @@ func main() {
 
 	switch {
 	case *send != "":
-		run(headless.Send(servers, splitList(*send), list, stunOpt), userLang)
+		run(headless.Send(servers, splitList(*send), userLang, list, stunOpt), userLang)
 	case *receive != "":
-		run(headless.Receive(servers, *receive, outDir, *yes, list, stunOpt), userLang)
+		run(headless.Receive(servers, *receive, outDir, *yes, userLang, list, stunOpt), userLang)
 	default:
 		maybeSpawnTerminal()
 		run(tui.Run(tui.Config{
@@ -214,12 +260,81 @@ func maybeSpawnTerminal() {
 
 func run(err error, lang string) {
 	if err != nil {
-		if i18n.Normalize(lang) == i18n.EN {
-			fmt.Fprintln(os.Stderr, "Error:", err)
+		norm := i18n.Normalize(lang)
+		headline, hints := i18n.Explain(err, norm)
+
+		if norm == i18n.EN {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", headline)
+			if len(hints) > 0 {
+				fmt.Fprintln(os.Stderr, "\nWhat you can do:")
+				for _, h := range hints {
+					fmt.Fprintf(os.Stderr, "  • %s\n", h)
+				}
+			}
 		} else {
-			fmt.Fprintln(os.Stderr, "Hata:", err)
+			fmt.Fprintf(os.Stderr, "Hata: %s\n", headline)
+			if len(hints) > 0 {
+				fmt.Fprintln(os.Stderr, "\nNe yapabilirsin:")
+				for _, h := range hints {
+					fmt.Fprintf(os.Stderr, "  • %s\n", h)
+				}
+			}
 		}
-		os.Exit(1)
+		os.Exit(determineExitCode(err))
+	}
+}
+
+func determineExitCode(err error) int {
+	if err == nil {
+		return ExitCodeSuccess
+	}
+	if errors.Is(err, context.Canceled) {
+		return ExitCodeSignal
+	}
+	if errors.Is(err, transfer.ErrTransferDeclined) {
+		return ExitCodeCanceled
+	}
+	if errors.Is(err, transfer.ErrChecksumMismatch) ||
+		errors.Is(err, transfer.ErrInsufficientDiskSpace) ||
+		errors.Is(err, os.ErrPermission) {
+		return ExitCodeIO
+	}
+	if errors.Is(err, transfer.ErrWrongCode) ||
+		errors.Is(err, p2p.ErrTooManyWrongCodes) ||
+		errors.Is(err, p2p.ErrRoomExpired) ||
+		errors.Is(err, rendezvous.ErrRoomNotFound) ||
+		errors.Is(err, rendezvous.ErrInUse) {
+		return ExitCodeAuth
+	}
+	if errors.Is(err, p2p.ErrRendezvousUnreachable) ||
+		errors.Is(err, p2p.ErrPeerUnreachable) ||
+		errors.Is(err, transfer.ErrConnectionLost) {
+		return ExitCodeNetwork
+	}
+	var ce *p2p.CodeError
+	var se transfer.SourceError
+	if errors.As(err, &ce) || errors.As(err, &se) ||
+		errors.Is(err, transfer.ErrUnsafeDestination) ||
+		errors.Is(err, os.ErrNotExist) {
+		return ExitCodeUsage
+	}
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "not a room code") || strings.Contains(s, "closed after too many") ||
+		strings.Contains(s, "expired") || strings.Contains(s, "room code"):
+		return ExitCodeAuth
+	case strings.Contains(s, "could not reach") || strings.Contains(s, "dial") ||
+		strings.Contains(s, "connection"):
+		return ExitCodeNetwork
+	case strings.Contains(s, "no space left") || strings.Contains(s, "checksum") ||
+		strings.Contains(s, "permission"):
+		return ExitCodeIO
+	case strings.Contains(s, "declined"):
+		return ExitCodeCanceled
+	case strings.Contains(s, "canceled") || strings.Contains(s, "interrupt"):
+		return ExitCodeSignal
+	default:
+		return ExitCodeGeneral
 	}
 }
 

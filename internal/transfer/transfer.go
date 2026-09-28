@@ -124,6 +124,21 @@ var ErrWrongCode = errors.New("the room code does not match the other side")
 // time.
 var ErrBusy = errors.New("the other side is already sending these files to someone else")
 
+// ErrChecksumMismatch is returned when the downloaded file's SHA-256 does not match the manifest.
+var ErrChecksumMismatch = errors.New("checksum mismatch, the file may be corrupted")
+
+// ErrTransferDeclined is returned when the receiver declines the transfer.
+var ErrTransferDeclined = errors.New("transfer declined by receiver")
+
+// ErrFileModified is returned when a file's size or content changes while being sent.
+var ErrFileModified = errors.New("file modified while sending")
+
+// ErrInsufficientDiskSpace is returned when the destination disk does not have enough free space.
+var ErrInsufficientDiskSpace = errors.New("not enough free disk space")
+
+// ErrConnectionLost is returned when the network connection drops during transfer.
+var ErrConnectionLost = errors.New("connection lost during transfer")
+
 // errStalled is what an expired deadline means to a person.
 var errStalled = errors.New("the other side stopped responding")
 
@@ -312,7 +327,14 @@ func Send(s io.ReadWriteCloser, offer *Offer, creds Credentials, opts SendOption
 		return fmt.Errorf("no answer from receiver: %w", describe(err))
 	}
 	if !goAhead.OK {
-		return fmt.Errorf("receiver declined: %s", safetext.Clean(goAhead.Error, maxRemoteText))
+		cleaned := safetext.Clean(goAhead.Error, maxRemoteText)
+		if strings.Contains(cleaned, "declined") {
+			return fmt.Errorf("%w: %s", ErrTransferDeclined, cleaned)
+		}
+		if strings.Contains(cleaned, "disk space") {
+			return fmt.Errorf("%w: %s", ErrInsufficientDiskSpace, cleaned)
+		}
+		return fmt.Errorf("receiver declined: %s", cleaned)
 	}
 	offsets, err := checkOffsets(goAhead.Offsets, manifest)
 	if err != nil {
@@ -495,7 +517,7 @@ func sendFile(w io.Writer, dl deadlines, local string, info FileInfo, offset int
 		}
 	}
 	if sent != info.Size {
-		return fmt.Errorf("size of %s changed while sending (expected %d, read %d)", info.Name(), info.Size, sent)
+		return fmt.Errorf("%w: size of %s changed while sending (expected %d, read %d)", ErrFileModified, info.Name(), info.Size, sent)
 	}
 	return nil
 }
@@ -546,12 +568,16 @@ func Receive(s io.ReadWriteCloser, outDir string, creds Credentials, confirm fun
 		return nil, refuse(err)
 	}
 
+	if err := CheckAvailableSpace(outDir, manifest.TotalSize()); err != nil {
+		return nil, refuse(err)
+	}
+
 	// Let the user inspect what is coming — name and size of every file —
 	// and answer the sender before any disk space is used. No deadline of
 	// ours while a person decides; the sender has its own.
 	dl.both(0)
 	if confirm != nil && !confirm(manifest) {
-		return nil, refuse(fmt.Errorf("transfer declined"))
+		return nil, refuse(fmt.Errorf("%w: transfer declined", ErrTransferDeclined))
 	}
 
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -896,7 +922,7 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 		// The leftovers are poisoned — whatever they are, they are not this
 		// file — so do not let the next attempt resume from them.
 		os.Remove(p.path)
-		return "", fmt.Errorf("checksum mismatch for %s, the file may be corrupted", info.Name())
+		return "", fmt.Errorf("%w: checksum mismatch for %s, the file may be corrupted", ErrChecksumMismatch, info.Name())
 	}
 	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("could not finish writing %s: %w", info.Name(), err)

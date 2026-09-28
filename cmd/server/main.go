@@ -127,7 +127,7 @@ func main() {
 
 	announced, err := parseAnnounce(*announce)
 	if err != nil {
-		log.Fatalf("could not parse -announce: %v", err)
+		log.Fatalf("could not parse -announce (%v). Expected comma-separated multiaddrs such as /dns4/example.com/tcp/443/tls/ws", err)
 	}
 	trusted, err := parsePrefixes(*proxies)
 	if err != nil {
@@ -185,6 +185,9 @@ func main() {
 
 	h, err := libp2p.New(opts...)
 	if err != nil {
+		if strings.Contains(err.Error(), "address already in use") || strings.Contains(err.Error(), "bind:") {
+			log.Fatalf("could not start libp2p host: address already in use (check if ports -ws-port %d or -port %d are already in use by another process): %v", *wsPort, *port, err)
+		}
 		log.Fatalf("could not start libp2p host: %v", err)
 	}
 	defer h.Close() //nolint:errcheck // shutting down; nothing to recover
@@ -513,6 +516,11 @@ func loadOrCreateKey(path string) (crypto.PrivKey, string, error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
+		if fi, serr := os.Stat(path); serr == nil && runtime.GOOS != "windows" {
+			if fi.Mode().Perm()&0o077 != 0 {
+				log.Printf("WARNING: identity key %s has open permissions (%04o); consider 'chmod 0600 %s'", path, fi.Mode().Perm(), path)
+			}
+		}
 		priv, err := crypto.UnmarshalPrivateKey(data)
 		if err != nil {
 			return nil, "", fmt.Errorf("%s is not a valid key: %w", path, err)

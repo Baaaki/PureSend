@@ -25,6 +25,7 @@ package rendezvous
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	mrand "math/rand/v2"
@@ -200,6 +201,9 @@ func Unregister(ctx context.Context, h host.Host, server peer.ID, nameplate stri
 	return nil
 }
 
+// ErrRoomNotFound is returned when a requested room does not exist on the server.
+var ErrRoomNotFound = errors.New("room not found — the code may be wrong or expired")
+
 // Lookup asks the server for a nameplate and returns the registered peer's
 // connection info. The receiving side calls this. The server's answer is
 // not trusted: the transfer handshake is what proves the peer is the one
@@ -228,7 +232,7 @@ func Lookup(ctx context.Context, h host.Host, server peer.ID, nameplate string) 
 		}
 		return info, resp.RelayLimit, nil
 	case "not_found":
-		return nil, 0, fmt.Errorf("room %s not found — the code may be wrong or expired", nameplate)
+		return nil, 0, fmt.Errorf("room %s: %w", nameplate, ErrRoomNotFound)
 	default:
 		return nil, 0, fmt.Errorf("server error: %s", safetext.Clean(resp.Error, maxServerText))
 	}

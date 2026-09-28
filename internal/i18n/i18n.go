@@ -1,10 +1,14 @@
 package i18n
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"puresend/internal/p2p"
+	"puresend/internal/rendezvous"
 	"puresend/internal/safetext"
+	"puresend/internal/transfer"
 )
 
 // Lang represents a supported language.
@@ -599,7 +603,92 @@ func Explain(err error, lang Lang) (string, []string) {
 			"If possible, switch to another network (e.g. mobile hotspot instead of restricted Wi-Fi).",
 		}
 
+		var ce *p2p.CodeError
+		if errors.As(err, &ce) {
+			if ce.Word != "" {
+				return fmt.Sprintf("The word %q is not used in room codes.", ce.Word), []string{
+					"Ask your friend for the code spelling again.",
+				}
+			}
+			return fmt.Sprintf("%q is not a room code.", ce.Code), []string{
+				"A room code consists of two words and a number, e.g. cherry-harbor-42.",
+			}
+		}
+
+		var se transfer.SourceError
+		if errors.As(err, &se) {
+			return "Could not read one of the selected files.", []string{
+				"Check that the file exists and you have permission to read it.",
+			}
+		}
+
 		switch {
+		case errors.Is(err, transfer.ErrWrongCode):
+			return "Room code does not match.", []string{
+				"Make sure you typed the code character for character.",
+				"Ask your friend to read the code again — every letter matters.",
+				"A code works once, and closes after 3 wrong attempts; if so, ask for a new one.",
+			}
+		case errors.Is(err, p2p.ErrTooManyWrongCodes):
+			return "The code was closed after too many wrong attempts.", []string{
+				"Nothing was shared: files only go to someone who proves the code.",
+				"Someone may have tried to guess it, or it was mistyped several times.",
+				"Start a new transfer to get a fresh code.",
+			}
+		case errors.Is(err, transfer.ErrUnsafeDestination):
+			return "Files cannot be saved straight into your home folder.", []string{
+				"Choose a folder inside it, such as Downloads/PureSend.",
+				"The sender names the folders inside a transfer; in your home folder those could be where programs keep their settings.",
+			}
+		case errors.Is(err, transfer.ErrBusy):
+			return "Another transfer is currently in progress with this code.", []string{
+				"Ask your friend what appears on their screen — files might be going to someone else.",
+				"If they didn't share the code with anyone else, have them start fresh with a new code.",
+			}
+		case errors.Is(err, rendezvous.ErrRoomNotFound):
+			return "No room found with this code.", []string{
+				"Make sure the code is typed correctly (three parts with dashes).",
+				"Your friend's app must still be open and waiting.",
+				"Codes are single-use and valid for 1 hour; request a new code if needed.",
+			}
+		case errors.Is(err, p2p.ErrRoomExpired):
+			return "Room code expired.", []string{
+				"Start a new transfer to obtain a fresh code.",
+			}
+		case errors.Is(err, rendezvous.ErrInUse):
+			return "This code is currently in use by someone else.", []string{
+				"Try again — a new code will be generated.",
+			}
+		case errors.Is(err, p2p.ErrRendezvousUnreachable):
+			return "Could not reach the meeting point.", []string{
+				"Check your internet connection.",
+				"If your firewall blocks WebSocket/P2P traffic, try another network.",
+			}
+		case errors.Is(err, p2p.ErrPeerUnreachable):
+			return "Could not connect to your friend's computer.", []string{
+				"Check if your friend's app is still open and waiting.",
+				"Try again — connection often succeeds on the second attempt.",
+			}
+		case errors.Is(err, transfer.ErrTransferDeclined):
+			return "Transfer declined by receiver.", nil
+		case errors.Is(err, transfer.ErrChecksumMismatch):
+			return "File download was incomplete or corrupted.", []string{
+				"Restart the transfer; corrupted file was not saved to disk.",
+			}
+		case errors.Is(err, transfer.ErrInsufficientDiskSpace):
+			return "Not enough free disk space.", []string{
+				"Free up space on the destination drive.",
+				"You can select another download folder from the main menu or use the -out flag.",
+			}
+		case errors.Is(err, transfer.ErrFileModified):
+			return "A file changed while being sent.", []string{
+				"The file was modified during transfer.",
+				"Make sure the file is not being edited or replaced by another program and retry.",
+			}
+		case errors.Is(err, p2p.ErrRelayLimitExceeded):
+			return "Transfer exceeded relay size limit.", retryTogether
+		case errors.Is(err, transfer.ErrConnectionLost):
+			return "Connection dropped during transfer.", retryTogether
 		case has("room code does not match"):
 			return "Room code does not match.", []string{
 				"Make sure you typed the code character for character.",
@@ -732,7 +821,92 @@ func Explain(err error, lang Lang) (string, []string) {
 		"Mümkünse ikiniz de başka bir ağa geçin (wifi yerine mobil veri gibi).",
 	}
 
+	var ce *p2p.CodeError
+	if errors.As(err, &ce) {
+		if ce.Word != "" {
+			return fmt.Sprintf("Kodda tanınmayan kelime: %q.", ce.Word), []string{
+				"Kodu arkadaşından harf harf yeniden iste.",
+			}
+		}
+		return fmt.Sprintf("%q geçerli bir oda kodu değil.", ce.Code), []string{
+			"Kod iki kelime ve bir sayıdan oluşur, örneğin kiraz-liman-42.",
+		}
+	}
+
+	var se transfer.SourceError
+	if errors.As(err, &se) {
+		return "Seçtiğin dosyalardan biri okunamadı.", []string{
+			"Dosya yerinde duruyor mu ve açma iznin var mı, kontrol et.",
+		}
+	}
+
 	switch {
+	case errors.Is(err, transfer.ErrWrongCode):
+		return "Kod eşleşmedi.", []string{
+			"Kodu harfi harfine doğru yazdığından emin ol.",
+			"Arkadaşın sana kodu yeniden okusun — bir harf bile fark eder.",
+			"Kod tek kullanımlık ve 3 yanlış denemede kapanır; öyleyse yenisini iste.",
+		}
+	case errors.Is(err, p2p.ErrTooManyWrongCodes):
+		return "Kod çok fazla yanlış denemeden sonra kapatıldı.", []string{
+			"Hiçbir şey paylaşılmadı: dosyalar yalnızca kodu kanıtlayan kişiye gider.",
+			"Biri kodu tahmin etmeye çalışmış ya da kod birkaç kez yanlış yazılmış olabilir.",
+			"Yeni bir gönderim başlat; yeni bir kod alırsın.",
+		}
+	case errors.Is(err, transfer.ErrUnsafeDestination):
+		return "Dosyalar doğrudan ev klasörüne kaydedilemez.", []string{
+			"İçinde bir klasör seç, örneğin İndirilenler/PureSend.",
+			"Transferin içindeki klasör adlarını gönderen belirler; ev klasöründe bunlar programların ayar dosyalarını tuttuğu yerler olabilir.",
+		}
+	case errors.Is(err, transfer.ErrBusy):
+		return "Bu kodla şu an başka bir transfer sürüyor.", []string{
+			"Arkadaşına ekranında ne yazdığını sor — dosyalar başka birine gidiyor olabilir.",
+			"Kodu senden başka kimseye vermediyse, yeni bir kodla baştan başlasın.",
+		}
+	case errors.Is(err, rendezvous.ErrRoomNotFound):
+		return "Bu kodla açılmış bir oda bulunamadı.", []string{
+			"Kodu doğru yazdığından emin ol (üç parça, aralarında tire).",
+			"Arkadaşının programı hâlâ açık ve bekliyor olmalı.",
+			"Kod tek kullanımlık ve en fazla 1 saat geçerli; kullanıldıysa yeni kod istesin.",
+		}
+	case errors.Is(err, p2p.ErrRoomExpired):
+		return "Kodun süresi doldu.", []string{
+			"Yeni bir gönderim başlat; yeni bir kod alırsın.",
+		}
+	case errors.Is(err, rendezvous.ErrInUse):
+		return "Bu kod şu an başkası tarafından kullanılıyor.", []string{
+			"Tekrar dene — yeni bir kod üretilecek.",
+		}
+	case errors.Is(err, p2p.ErrRendezvousUnreachable):
+		return "Buluşma noktasına ulaşılamadı.", []string{
+			"İnternet bağlantını kontrol et.",
+			"Güvenlik duvarın engelliyor olabilir, başka bir ağdan dene.",
+		}
+	case errors.Is(err, p2p.ErrPeerUnreachable):
+		return "Arkadaşının bilgisayarına bağlanılamadı.", []string{
+			"Arkadaşının programı açık ve bekliyor durumda mı, sor.",
+			"İkiniz de tekrar deneyin — çoğu zaman ikinci denemede olur.",
+		}
+	case errors.Is(err, transfer.ErrTransferDeclined):
+		return "Karşı taraf transferi kabul etmedi.", nil
+	case errors.Is(err, transfer.ErrChecksumMismatch):
+		return "Dosya eksik veya bozuk indi.", []string{
+			"Transferi tekrar başlatın; bozuk dosya diske kaydedilmedi.",
+		}
+	case errors.Is(err, transfer.ErrInsufficientDiskSpace):
+		return "Diskte yeterli boş alan yok.", []string{
+			"Hedef sürücüde yer aç.",
+			"Ana menüden başka bir klasör seç veya -out bayrağıyla farklı bir disk belirt.",
+		}
+	case errors.Is(err, transfer.ErrFileModified):
+		return "Gönderilen dosyalardan biri transfer sırasında değişti.", []string{
+			"Dosya transfer edilirken içeriği veya boyutu değiştirildi.",
+			"Dosyayı kullanan başka bir program varsa kapatıp tekrar deneyin.",
+		}
+	case errors.Is(err, p2p.ErrRelayLimitExceeded):
+		return "Dosya boyutu yedek yol sınırını aştı.", retryTogether
+	case errors.Is(err, transfer.ErrConnectionLost):
+		return "Bağlantı transfer sırasında koptu.", retryTogether
 	case has("room code does not match"):
 		return "Kod eşleşmedi.", []string{
 			"Kodu harfi harfine doğru yazdığından emin ol.",
