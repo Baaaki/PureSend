@@ -6,6 +6,40 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.6] - 2026-09-28
+
+### Added
+
+- **Structured CLI error handling and actionable suggestions.** CLI and
+  headless modes now run errors through `i18n.Explain`. Rather than
+  leaking raw libp2p or system stack traces, errors present clear localized
+  summaries with bulleted suggestions ("What you can do" / "Ne yapabilirsin").
+- **Typed sentinel errors across all packages.** Exported distinct error
+  sentinels (`rendezvous.ErrRoomNotFound`, `transfer.ErrChecksumMismatch`,
+  `transfer.ErrTransferDeclined`, `transfer.ErrFileModified`,
+  `transfer.ErrInsufficientDiskSpace`, `transfer.ErrConnectionLost`,
+  `p2p.ErrRoomExpired`, `p2p.ErrRendezvousUnreachable`,
+  `p2p.ErrPeerUnreachable`, `p2p.ErrRelayLimitExceeded`), allowing robust
+  programmatic checks with `errors.Is` / `errors.As`.
+- **Early file and destination validation.** Sender now verifies that files
+  exist and are readable before bringing up the P2P network stack. Receiver
+  eagerly validates that the target destination directory is writable and safe.
+- **Disk space pre-check.** Receiver verifies available disk capacity
+  (`transfer.CheckAvailableSpace`) before initiating incoming payload writes.
+- **Multilingual headless experience.** CLI flags `-lang tr` and `-lang en`
+  now fully translate terminal transfer prompts, acceptance queries, and
+  progress output.
+- **Structured exit codes.** Client returns standard exit codes (0 for success,
+  2 for bad syntax or flags, 3 for network unreachable, 4 for wrong code or
+  expired room, 5 for declined transfer, 6 for I/O and checksum errors, 130
+  for interrupt).
+- **CLI flag validation and guidance.** Detects and warns about positional
+  arguments (e.g. `puresend send file` instead of `-send`) and conflicting
+  flags (`-yes` or `-out` used with `-send`).
+- **Server diagnostics.** Server checks socket availability before listening,
+  provides clear port collision guidance (e.g. port 4001 in use), validates
+  announcement multiaddresses, and checks private key file permissions.
+
 ## [2.0.5] - 2026-09-27
 
 ### Fixed

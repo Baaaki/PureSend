@@ -2,7 +2,7 @@
 # Contributor: PureSend Contributors
 
 pkgname=puresend-bin
-pkgver=2.0.5
+pkgver=2.0.6
 pkgrel=1
 pkgdesc="End-to-end encrypted peer-to-peer file transfer for the terminal (libp2p)"
 arch=('x86_64')
