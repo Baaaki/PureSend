@@ -45,11 +45,11 @@ import (
 const (
 	ExitCodeSuccess  = 0
 	ExitCodeGeneral  = 1
-	ExitCodeUsage    = 2 // Invalid flags, unexpected arguments, file not found locally, bad room code format
-	ExitCodeNetwork  = 3 // Rendezvous unreachable, peer unreachable, connection dropped
-	ExitCodeAuth     = 4 // Room code does not match, too many wrong attempts, code expired, room not found
-	ExitCodeIO       = 5 // Disk full, permission denied, checksum mismatch
-	ExitCodeCanceled = 6 // Transfer declined by user
+	ExitCodeUsage    = 2   // Invalid flags, unexpected arguments, file not found locally, bad room code format
+	ExitCodeNetwork  = 3   // Rendezvous unreachable, peer unreachable, connection dropped
+	ExitCodeAuth     = 4   // Room code does not match, too many wrong attempts, code expired, room not found
+	ExitCodeIO       = 5   // Disk full, permission denied, checksum mismatch
+	ExitCodeCanceled = 6   // Transfer declined by user
 	ExitCodeSignal   = 130 // Interrupted by SIGINT/Ctrl+C
 )
 
