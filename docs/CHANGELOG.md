@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.0.6] - 2026-09-28
+## [2.0.7] - 2026-09-28
 
 ### Added
 
@@ -39,6 +39,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Server diagnostics.** Server checks socket availability before listening,
   provides clear port collision guidance (e.g. port 4001 in use), validates
   announcement multiaddresses, and checks private key file permissions.
+
+### Fixed
+
+- **Linter and format compliance.** Fixed `gofmt` tab alignment in client constants
+  and split disk space checking across OS-specific files (`disk_linux.go`, `disk_darwin.go`,
+  `disk_windows.go`) to satisfy `unconvert` and `nilerr`.
 
 ## [2.0.5] - 2026-09-27
 
