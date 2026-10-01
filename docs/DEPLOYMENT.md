@@ -1,104 +1,113 @@
-# PureSend — Sunucu Kurulum ve Dağıtım Rehberi (Deployment Guide)
+# PureSend — Server Setup and Deployment Guide
 
-Bu kılavuz, PureSend buluşma (rendezvous) ve yedek aktarım (relay) sunucusunun Docker Compose veya ters vekil (reverse proxy) arkasında güvenli, kesintisiz ve standart bir şekilde çalıştırılması için gerekli adımları içerir.
+[Türkçe](DEPLOYMENT_TR.md)
 
----
-
-## 1. Mimarî ve Ön Koşullar
-
-Sunucu (`cmd/server`) istemcilerin dosya içeriklerine asla dokunmaz ve oda kodlarının yalnızca numarasını (`kiraz-liman-42` için `42`) görür; gizli kelimeler ona hiç gönderilmez:
-* **8080/TCP:** libp2p WebSocket sinyalleşme ve DCUtR delik açma portu.
-* **8081/TCP:** Sağlık kontrolü (`/health`) ve Prometheus metrik (`/metrics`) portu (yalnızca yerel erişim).
-
-```
-İstemci ──wss://p2p.alanadiniz.com:443──► [Ters Vekil / Tünel] ──ws://localhost:8080──► PureSend Sunucu
-                                            (TLS Sonlandırma)                                (Docker)
-```
+This guide covers what it takes to run the PureSend rendezvous and relay server securely, without interruption and in a standard way, with Docker Compose or behind a reverse proxy.
 
 ---
 
-## 2. Hızlı Başlangıç: Docker Compose (Önerilen)
+## 1. Architecture and Prerequisites
 
-En kolay ve güvenli yöntem, repo kökündeki `docker-compose.yml` dosyasını kullanmaktır.
+The server (`cmd/server`) never touches the clients' file contents and sees only the number of a room code (`42` for `kiraz-liman-42`); the secret words are never sent to it:
+* **8080/TCP:** libp2p WebSocket signaling and DCUtR hole-punching port.
+* **8081/TCP:** health check (`/health`) and Prometheus metrics (`/metrics`) port (local access only).
 
-### Adım 1: Alan Adınızı Belirleyin ve Başlatın
+```
+Client ──wss://p2p.example.com:443──► [Reverse proxy / Tunnel] ──ws://localhost:8080──► PureSend server
+                                         (TLS termination)                                (Docker)
+```
+
+---
+
+## 2. Quick Start: Docker Compose (Recommended)
+
+The easiest and safest way is to use the `docker-compose.yml` at the root of the repository.
+
+### Step 1: Set Your Domain and Start
 
 ```bash
-# Alan adınızı çevre değişkeni olarak tanımlayıp sunucuyu başlatın
-PUBLIC_HOST=p2p.alanadiniz.com docker compose up -d
+# Define your domain as an environment variable and start the server
+PUBLIC_HOST=p2p.example.com docker compose up -d
 ```
 
-*(Dilerseniz repo köküne bir `.env` dosyası oluşturup `PUBLIC_HOST=p2p.alanadiniz.com` yazabilirsiniz.)*
+*(Alternatively, create a `.env` file at the repository root containing `PUBLIC_HOST=p2p.example.com`.)*
 
-### Adım 2: Sunucu Peer ID'sini Alın
+> ⚠️ If `PUBLIC_HOST` is not set, `docker-compose.yml` falls back to the project's own hostname (`rendezvous.madebybaki.com`) and your server will announce that address to clients. Always set it for your own deployment.
 
-Sunucu ilk başladığında kalıcı bir kimlik anahtarı üretir. İstemcilerin sunucuya bağlanabilmesi için bu Peer ID gereklidir:
+### Step 2: Get the Server's Peer ID
+
+The first time the server starts it generates a persistent identity key. Clients need the resulting Peer ID to connect to the server:
 
 ```bash
 docker compose logs rendezvous | grep "Peer ID"
 ```
 
-Çıktı örneği:
+Example output of the full startup banner:
 ```text
-  Peer ID: 12D3KooWKKqpYTw3D8arNmcNG7ZK1mPfSH2cQ7ohZqHBmYN6eEAn
+Rendezvous + relay server 2.0.7 is running.
 
-Client address:
-  /dns4/p2p.alanadiniz.com/tcp/443/tls/ws/p2p/12D3KooWKKqpYTw3D8arNmcNG7ZK1mPfSH2cQ7ohZqHBmYN6eEAn
+  Peer ID: 12D3KooWKKqpYTw3D8arNmcNG7ZK1mPfSH2cQ7ohZqHBmYN6eEAn
+  Identity from: /data/server.key
+
+Client address (bake this into the client build):
+  /dns4/p2p.example.com/tcp/443/tls/ws/p2p/12D3KooWKKqpYTw3D8arNmcNG7ZK1mPfSH2cQ7ohZqHBmYN6eEAn
 ```
 
-> ⚠️ **ÖNEMLİ:** `rendezvous-key` Docker volume'ü sunucu kimliğini saklar. Bu volume silinirse Peer ID değişir ve eski istemciler sunucuya bağlanamaz.
+> ⚠️ **IMPORTANT:** The `rendezvous-key` Docker volume holds the server's identity. If it is deleted, the Peer ID changes and existing clients can no longer connect to the server.
 
 ---
 
-## 3. Ters Vekil (Reverse Proxy) & Tünel Seçenekleri
+## 3. Reverse Proxy and Tunnel Options
 
-Sunucu yerel ağda düz `ws://` dinlediği için TLS sonlandırması ters vekil tarafından yapılmalıdır. İhtiyacınıza uygun olanı seçin:
+The server listens on plain `ws://` inside the local network, so TLS has to be terminated by a reverse proxy. Pick the option that fits you:
 
-### Seçenek A: Cloudflare Tunnel (Statik IP Gerektirmez)
+### Option A: Cloudflare Tunnel (No Static IP Required)
 
-Eğer sunucunuzun sabit bir genel IP'si veya açık portu yoksa Cloudflare Tunnel en pratik çözümdür.
+If your server has no fixed public IP or open port, Cloudflare Tunnel is the most practical solution.
 
-`cloudflared` ingress yapılandırmanıza (`/etc/cloudflared/config.yml`) ekleyin:
+Add this to your `cloudflared` ingress configuration (`/etc/cloudflared/config.yml`):
 
 ```yaml
-tunnel: <tunnel-uuid-veya-adi>
+tunnel: <tunnel-uuid-or-name>
 credentials-file: /root/.cloudflared/<tunnel-uuid>.json
 
 ingress:
-  - hostname: p2p.alanadiniz.com
+  - hostname: p2p.example.com
     service: http://localhost:8080
     originRequest:
       connectTimeout: 30s
   - service: http_status:404
 ```
 
-Servisi yeniden başlatın:
+Restart the service:
 ```bash
 sudo systemctl restart cloudflared
 ```
 
+> If the machine already runs a tunnel for something else, merge the `hostname` block into the existing `ingress:` list instead of replacing the file. [deploy/cloudflared-config.yml](../deploy/cloudflared-config.yml) is an annotated example that explains how.
+
 ---
 
-### Seçenek B: Caddy (Otomatik Let's Encrypt TLS)
+### Option B: Caddy (Automatic Let's Encrypt TLS)
 
-Sabit IP'li bir VPS kullanıyorsanız Caddy otomatik SSL sertifikası üretir ve WebSocket trafiğini yönlendirir.
+If you use a VPS with a fixed IP, Caddy obtains the SSL certificate automatically and forwards the WebSocket traffic.
 
 `/etc/caddy/Caddyfile`:
 ```caddy
-p2p.alanadiniz.com {
+p2p.example.com {
     reverse_proxy localhost:8080
 }
 ```
 
 ---
 
-### Seçenek C: Nginx
+### Option C: Nginx
 
-Mevcut bir Nginx altyapınız varsa `/etc/nginx/sites-available/puresend.conf`:
+If you already have an Nginx setup, use `/etc/nginx/sites-available/puresend.conf`:
 
 ```nginx
 server {
-    server_name p2p.alanadiniz.com;
+    server_name p2p.example.com;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -110,40 +119,40 @@ server {
         proxy_send_timeout 86400s;
     }
 
-    listen 443 ssl; # SSL sertifika direktiflerinizi ekleyin
+    listen 443 ssl; # add your SSL certificate directives
 }
 ```
 
 ---
 
-### Tüm Seçenekler İçin: Kenar Katmanında IP Başına Hız Sınırı
+### For All Options: Per-IP Rate Limiting at the Edge
 
-Tünelin ya da ters vekilin arkasında bütün istemciler sunucuya aynı adresten (tünelin kendisinden) gelir. Bu yüzden `-trusted-proxies` ağlarından gelen bağlantılar libp2p'nin adres başına sınırlarından muaftır; muaf olmasalardı, dünyadaki bütün kullanıcılar tek bir adresin 8 bağlantılık payını paylaşırdı. Sunucunun kendi sınırları (eş başına bir oda, eş başına dakikada 5 sorgu, sunucu genelinde dakikada 200 boş sorgu) her yeni bağlantıyı biraz pahalılaştırır; ama istemci kimliği bedava olduğundan tek bir adresten gelen bir seli **durduramaz**. Oda numaraları herkese açık olduğu ve gönderici 3 yanlış koddan sonra odasını kapattığı için, sınırsız bağlantı açabilen biri numaraları tarayıp odaları kapatabilir. Adres başına sınırın yeri kenar katmanıdır.
+Behind a tunnel or reverse proxy, every client reaches the server from the same address (the tunnel itself). That is why connections from `-trusted-proxies` networks are exempt from libp2p's per-address limits; without the exemption, every user in the world would share one address's allowance of 8 connections. The server's own limits (one room per peer, 5 lookups per minute per peer, 200 empty lookups per minute server-wide) make each new connection a little more expensive, but because a client identity is free they **cannot stop** a flood from a single address. Room numbers are public and a sender closes its room after 3 wrong codes, so anyone who can open unlimited connections can walk the numbers and close rooms. The per-address limit belongs at the edge.
 
-Her istemci oturumu tek bir WebSocket bağlantısıdır, yani saydığımız şey `/` yoluna gelen yeni bağlantı istekleridir.
+Every client session is a single WebSocket connection, so what we count is new connection requests to the `/` path.
 
-#### Cloudflare (Tunnel ile)
+#### Cloudflare (with Tunnel)
 
-Cloudflare Dashboard → alan adı → **Security** → **WAF** → **Rate limiting rules** → **Create rule**:
+Cloudflare Dashboard → your domain → **Security** → **WAF** → **Rate limiting rules** → **Create rule**:
 
-| Ayar | Değer |
+| Setting | Value |
 | :--- | :--- |
-| Kural adı | `PureSend bağlantı sınırı` |
-| İfade | *URI Path* **equals** `/` (ifade düzenleyicide: `(http.request.uri.path eq "/")`) |
-| Sayılan özellik | IP |
-| Sınır | **10 saniyede 5 istek** |
-| Eylem | **Block**, süre **10 saniye** |
+| Rule name | `PureSend connection limit` |
+| Expression | *URI Path* **equals** `/` (in the expression editor: `(http.request.uri.path eq "/")`) |
+| Counting characteristic | IP |
+| Limit | **5 requests per 10 seconds** |
+| Action | **Block**, duration **10 seconds** |
 
-Ücretsiz planda tek kural hakkı vardır; ifadede yalnızca yol (Path) alanı kullanılabilir, sayma ve engelleme süresi 10 saniyedir. Alan adı (Host) seçilemediği için kural, bu bölgede (zone) Cloudflare üzerinden geçen **bütün** alt alan adlarının `/` isteklerine uygulanır; aynı bölgede bir web sitesi de varsa, onun ana sayfasına gelen istekler de sayılır. 10 saniyede 5 istek bir insanın gezinmesine dokunmaz. Pro ve üstü planlarda ifadeye `http.host eq "rendezvous.alanadiniz.com"` ekleyip süreleri uzatabilirsiniz (örn. dakikada 20 istek, 10 dakika engel).
+The free plan allows a single rule; only the path field can be used in the expression, and the counting and blocking periods are 10 seconds. Because the host name cannot be selected, the rule applies to the `/` requests of **all** subdomains that pass through Cloudflare in this zone; if the same zone also hosts a website, requests to its home page are counted too. 5 requests in 10 seconds does not get in a human's way. On Pro and higher plans you can add `http.host eq "rendezvous.example.com"` to the expression and use longer periods (for example 20 requests per minute, a 10-minute block).
 
 #### Nginx
 
 ```nginx
-# http bloğunda: IP başına dakikada 20 yeni bağlantı
+# In the http block: 20 new connections per minute per IP
 limit_req_zone $binary_remote_addr zone=puresend:10m rate=20r/m;
 
 server {
-    server_name p2p.alanadiniz.com;
+    server_name p2p.example.com;
 
     location / {
         limit_req zone=puresend burst=5 nodelay;
@@ -160,60 +169,60 @@ server {
 }
 ```
 
-Caddy'nin standart sürümünde hız sınırı yoktur; gerekiyorsa [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) eklentisiyle derlenmiş bir Caddy ya da yukarıdaki Nginx yapılandırması kullanılmalıdır.
+The standard Caddy build has no rate limiting; if you need it, use a Caddy built with the [caddy-ratelimit](https://github.com/mholt/caddy-ratelimit) plugin, or the Nginx configuration above.
 
-`puresend_lookups_throttled_total` ve `libp2p_rcmgr_blocked_resources` metriklerindeki ani artışlar, kenar sınırının yetersiz kaldığını gösterir.
+Sudden jumps in the `puresend_lookups_throttled_total` and `libp2p_rcmgr_blocked_resources` metrics show that the edge limit is not enough.
 
 ---
 
-## 4. Dağıtımı Doğrulama ve Sağlık Kontrolü
+## 4. Verifying the Deployment and Health Check
 
-### 1. Yerel Sağlık Kontrolü
-Sunucu üzerinde JSON sağlık çıktısını test edin:
+### 1. Local Health Check
+Test the JSON health output on the server:
 ```bash
 curl http://localhost:8081/health
 ```
-**Beklenen Yanıt:**
+**Expected response** (`version` is the build's `FT_VERSION`; `dev` if you built without one):
 ```json
-{"status":"ok","version":"v0.2.0","peer_id":"12D3KooW...","active_rooms":0}
+{"status":"ok","version":"2.0.7","peer_id":"12D3KooW...","active_rooms":0}
 ```
 
-### 2. Dışarıdan WebSocket El Sıkışması Testi
-Sunucu dışındaki bir ağdan WebSocket bağlantısını test edin:
+### 2. WebSocket Handshake Test From Outside
+Test the WebSocket connection from a network outside the server:
 ```bash
-curl -sI https://p2p.alanadiniz.com \
+curl -sI https://p2p.example.com \
      -H "Connection: Upgrade" -H "Upgrade: websocket"
 ```
-**Beklenen Yanıt:** `HTTP/1.1 101 Switching Protocols`.
+**Expected response:** `HTTP/1.1 101 Switching Protocols`.
 
 ---
 
-## 5. Güvenlik Sertleştirmesi ve İzleme
+## 5. Security Hardening and Monitoring
 
-### 5.1 Docker Güvenliği
-Sağlanan `docker-compose.yml` şu sertleştirmelerle birlikte gelir:
-* **Salt-okunur Dosya Sistemi (`read_only: true`):** Konteyner kök dizinine zararlı dosya yazılamaz.
-* **Yetki İzolasyonu (`cap_drop: ALL`, `no-new-privileges: true`):** Root yetki yükseltmeleri engellenir.
-* **Port İzolasyonu:** `8080` ve `8081` yalnızca `127.0.0.1` dinler; dış dünyaya doğrudan açılmaz.
+### 5.1 Docker Security
+The provided `docker-compose.yml` comes with these hardening measures:
+* **Read-only filesystem (`read_only: true`):** No malicious file can be written to the container's root.
+* **Privilege isolation (`cap_drop: ALL`, `no-new-privileges: true`):** Root privilege escalation is blocked.
+* **Port isolation:** `8080` and `8081` listen only on `127.0.0.1`; they are never exposed directly to the outside world.
 
-### 5.2 Prometheus Metrikleri
-Sunucu `http://localhost:8081/metrics` üzerinden metrik yayınlar. Öne çıkan metrikler:
+### 5.2 Prometheus Metrics
+The server publishes metrics at `http://localhost:8081/metrics`. The notable ones:
 
-| Metrik | Anlamı |
+| Metric | Meaning |
 |---|---|
-| `puresend_active_rooms` | Anlık aktif transfer odası sayısı |
-| `puresend_rooms_expired_total` | Zaman aşımına uğrayıp kapatılan odalar |
-| `puresend_rooms_evicted_total` | Tablo dolduğunda yer açmak için erken düşürülen, sahibi ayrılmış odalar |
-| `puresend_lookups_throttled_total` | Hız sınırına (rate limit) takılan oda sorguları |
-| `libp2p_relaysvc_data_transferred_bytes_total` | Röle üzerinden akan veri miktarı (bayt) |
-| `libp2p_rcmgr_blocked_resources` | Kaynak yöneticisinin reddettiği aşırı istekler |
+| `puresend_active_rooms` | Number of transfer rooms active right now |
+| `puresend_rooms_expired_total` | Rooms closed after timing out |
+| `puresend_rooms_evicted_total` | Rooms whose owner had left, dropped early to make space when the table is full |
+| `puresend_lookups_throttled_total` | Room lookups that hit the rate limit |
+| `libp2p_relaysvc_data_transferred_bytes_total` | Amount of data flowing through the relay (bytes) |
+| `libp2p_rcmgr_blocked_resources` | Excessive requests rejected by the resource manager |
 
-### 5.3 Sunucu Kimlik Anahtarını Yedekleme (Kurtarma)
-Sunucu anahtarını parola yöneticinizde saklamak için:
+### 5.3 Backing Up the Server Identity Key (Recovery)
+To keep the server key in your password manager:
 ```bash
 docker compose exec rendezvous base64 -w0 /data/server.key
 ```
-Yeni veya farklı bir sunucuda aynı kimliği kullanmak için compose ortamında `FT_IDENTITY_KEY` değişkenine bu çıktıyı atamanız yeterlidir:
+To use the same identity on a new or different server, just assign this output to the `FT_IDENTITY_KEY` variable in the compose environment:
 ```yaml
 environment:
   - FT_IDENTITY_KEY=CAESQ...
@@ -221,98 +230,98 @@ environment:
 
 ---
 
-## 6. Sürüm Yayınlama ve İmzalama
+## 6. Releasing and Signing
 
-İstemciler `v*` etiketi itildiğinde `.github/workflows/release.yml` ile derlenip GitHub Releases'e yüklenir. İki kural geçerlidir:
+Clients are built and uploaded to GitHub Releases by `.github/workflows/release.yml` when a `v*` tag is pushed. Two rules apply:
 
-### 6.1 Yayınlanmış bir sürüm değiştirilmez
+### 6.1 A published release is never changed
 
-İş akışı, etiketi için zaten bir sürüm bulunan bir yayını reddeder. Yayınlanmış dosyaların özetleri kullanıcılar, `puresend -update`, kurulum betikleri ve AUR `PKGBUILD` tarafından denetlenmiştir; aynı etiket altında yeniden yayın, bu denetimlerin hepsini geçersiz kılar. Bir düzeltme yeni bir sürüm numarasıdır (`v1.0.1`). Deponun **Settings → General → Releases** bölümünde GitHub'ın *release immutability* ayarı varsa açın; etiket ve dosyalar GitHub tarafında da kilitlenir.
+The workflow refuses to publish for a tag that already has a release. The digests of published files have been checked by users, `puresend -update`, the install scripts and the AUR `PKGBUILD`; re-publishing under the same tag would invalidate all of those checks. A fix is a new version number (`v1.0.1`). If the repository's **Settings → General → Releases** has GitHub's *release immutability* setting, turn it on; the tag and the files are then locked on GitHub's side too.
 
-### 6.2 `checksums.txt` minisign ile imzalanır
+### 6.2 `checksums.txt` is signed with minisign
 
-`puresend -update` ve kurulum betikleri indirdikleri arşivi her zaman `checksums.txt` ile karşılaştırır. Bu, bozuk ya da değiştirilmiş bir indirmeyi yakalar; ama sürüm sayfasını değiştirebilen biri listeyi de değiştirebilir. İmza, listeyi başka bir yerde saklanan bir anahtara bağlar.
+`puresend -update` and the install scripts always compare the archive they download with `checksums.txt`. That catches a corrupted or tampered download, but whoever can change the release page can change the list too. The signature ties the list to a key kept somewhere else.
 
-Bir kez yapılacak kurulum (anahtar parolasız üretilir, çünkü iş akışı parola giremez):
+One-time setup (the key is generated without a passphrase, because the workflow cannot type one):
 
 ```bash
 minisign -G -W -p puresend.pub -s puresend.key
 ```
 
-1. **Settings → Secrets and variables → Actions → Secrets:** `MINISIGN_SECRET_KEY` = `puresend.key` dosyasının tamamı.
-2. **Settings → Secrets and variables → Actions → Variables:** `FT_UPDATE_KEY` = `puresend.pub` dosyasının **ikinci satırı** (`RW...` ile başlar).
-3. Aynı `RW...` satırını `install.sh` içindeki `PUBKEY=""` ve `install.ps1` içindeki `$pubKey = ""` değerlerine yazın. İki betik de imzayı yalnızca makinede `minisign` kuruluysa denetler; SHA-256 denetimi her durumda yapılır.
-4. `puresend.key` dosyasını parola yöneticinizde ya da çevrimdışı bir yerde saklayın ve depoya koymayın (`.gitignore` `*.key` dosyalarını zaten dışarıda tutar).
+1. **Settings → Secrets and variables → Actions → Secrets:** `MINISIGN_SECRET_KEY` = the whole content of `puresend.key`.
+2. **Settings → Secrets and variables → Actions → Variables:** `FT_UPDATE_KEY` = the **second line** of `puresend.pub` (it starts with `RW...`).
+3. Write the same `RW...` line into `PUBKEY=""` in `install.sh` and `$pubKey = ""` in `install.ps1`. Both scripts verify the signature only if `minisign` is installed on the machine; the SHA-256 check always runs.
+4. Keep `puresend.key` in your password manager or somewhere offline and do not put it in the repository (`.gitignore` already excludes `*.key` files).
 
-Bundan sonra her yayın `checksums.txt.minisig` dosyasını da içerir ve istemcilere `FT_UPDATE_KEY` gömülür. İş akışı, iki değerden yalnızca biri ayarlıysa ya da gizli anahtar açık anahtarla eşleşmiyorsa hiçbir şey derlemeden durur; eşleşmeyen bir anahtarla çıkan istemciler bir daha kendiliğinden güncellenemezdi.
+From then on every release also contains `checksums.txt.minisig`, and `FT_UPDATE_KEY` is embedded in the clients. The workflow builds nothing and stops if only one of the two values is set, or if the secret key does not match the public key; clients shipped with a mismatched key could never update themselves again.
 
-> ⚠️ Anahtarı gömülü istemciler, imzasız ya da başka anahtarla imzalanmış bir sürüme güncellenmeyi reddeder. Gizli anahtarı kaybetmek, bu istemcilerin `-update` ile güncellenemeyeceği anlamına gelir; kullanıcıların kurulum betiğiyle yeniden kurması gerekir.
+> ⚠️ Clients with the key embedded refuse to update to a release that is unsigned or signed with another key. Losing the secret key means these clients cannot be updated with `-update`; users have to reinstall with the install script.
 
-Bir sürümü elle doğrulamak için:
+To verify a release by hand:
 
 ```bash
 minisign -Vm checksums.txt -P RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts
 sha256sum --ignore-missing -c checksums.txt
 ```
 
-### 6.3 Sunucu adresi ve `server.txt`
+### 6.3 Server Address and `server.txt`
 
-Her istemciye buluşma noktasının adresi, Peer ID'siyle birlikte gömülür: `FT_SERVER` depo değişkeni ayarlıysa o, değilse `release.yml` içindeki varsayılan. Adres yanlışsa bu, ancak insanlar dosyaları indirdikten sonra fark edilir. Bu yüzden iş akışı, gömeceği adresin `FT_SERVER_LIST` (varsayılan `https://puresend.madebybaki.com/server.txt`) içinde listelendiğini denetler ve listede yoksa hiçbir şey derlemeden durur. İkisi uyuşmuyorsa biri eskimiştir; çoğu zaman sunucu anahtarı değiştikten sonra güncellenmemiş varsayılan. Liste o an indirilemezse iş akışı yalnızca uyarı verip devam eder.
+Every client gets the meeting point's address embedded together with its Peer ID: `FT_SERVER` if the repository variable is set, otherwise the default in `release.yml`. If the address is wrong, it is noticed only after people have downloaded the files. That is why the workflow checks that the address it is about to embed is listed in `FT_SERVER_LIST` (default `https://puresend.madebybaki.com/server.txt`), and builds nothing if it is not. If the two disagree, one of them is stale; most often it is the default that was not updated after the server key changed. If the list cannot be downloaded at that moment, the workflow only warns and carries on.
 
-Sunucu anahtarı değiştiğinde (bkz. 5.3) sıra şudur: önce `server.txt`'e yeni adres eklenir; eski sürümler gömülü adrese ulaşamayınca oraya bakar. Sonra `FT_SERVER` değişkeni ya da iş akışındaki varsayılan güncellenir, en son yeni sürüm etiketlenir.
+When the server key changes (see 5.3), the order is: first add the new address to `server.txt`; older releases look there when they cannot reach the embedded address. Then update the `FT_SERVER` variable or the default in the workflow, and tag the new release last.
 
-### 6.4 Yayın sırası
+### 6.4 Release Order
 
-1. `docs/CHANGELOG.md` içindeki `[Unreleased]` notlarını yeni sürümün başlığı altına taşıyın (`## [2.0.2] - YYYY-AA-GG`); iş akışı başlığı olmayan bir etiketi reddeder.
-2. **Önce etiketi, sonra `main`'i itin:** `git push origin v2.0.2`, iş akışı bitip sürüm yayına çıkınca `git push origin main`. Kurulum betikleri doğrudan `main`'den indirilir; yeni bir açık anahtar ya da yeni bir kural, onu karşılayan sürüm yayında olmadan `main`'e girerse betik o anki son sürümü reddedebilir.
-3. Sürümü doğrulayın: `checksums.txt.minisig` yayında mı, imza açık anahtarla doğrulanıyor mu (6.2), arşivler `checksums.txt` ile eşleşiyor mu.
-4. Web sitesindeki indirmeler sürümün **kendi dosyalarıdır**: doğrulanmış arşivlerden çıkarılır, yerelde ayrıca derlenmez. Yerel bir derlemeye `FT_UPDATE_KEY` gömülmez — o kopya imzasız bir güncellemeyi de kabul eder — ve dosya imzalı listeyle eşleşmez.
-5. `packaging/PKGBUILD` içindeki `pkgver` ve arşiv özetini yeni sürüme çekin; özet ancak sürüm derlendikten sonra bellidir.
+1. Move the `[Unreleased]` notes in `docs/CHANGELOG.md` under the new version's heading (`## [2.0.2] - YYYY-MM-DD`); the workflow rejects a tag that has no heading.
+2. **Push the tag first, then `main`:** `git push origin v2.0.2`, and `git push origin main` once the workflow has finished and the release is live. The install scripts are downloaded straight from `main`; if a new public key or a new rule reaches `main` before the release that satisfies it is out, the script can reject the then-latest release.
+3. Verify the release: is `checksums.txt.minisig` published, does the signature verify with the public key (6.2), do the archives match `checksums.txt`.
+4. The downloads on the website are **the release's own files**: extracted from the verified archives, never built locally. A local build does not embed `FT_UPDATE_KEY` (that copy would accept an unsigned update too), and the file would not match the signed list.
+5. Bring `pkgver` and the archive digest in `packaging/PKGBUILD` up to the new version; the digest is known only after the release is built.
 
 ---
 
-## 7. Gizli Anahtarlar: Envanter, Saklama ve Yenileme
+## 7. Secrets: Inventory, Storage and Rotation
 
-Projede iki gizli anahtar vardır. Diğer her değer — sunucu adresi, `server.txt`, imzalama anahtarının açık yarısı — herkese açıktır ve öyle kalabilir.
+The project holds two secret keys. Every other value (the server address, `server.txt`, the public half of the signing key) is public and may stay that way.
 
-| Anahtar | Nerede durur | Kaybolursa | Sızarsa |
+| Key | Where it lives | If lost | If leaked |
 | :--- | :--- | :--- | :--- |
-| **Sunucu kimlik anahtarı** (`server.key` / `FT_IDENTITY_KEY`) | Sunucudaki `rendezvous-key` volume'ünde (`/data/server.key`); yedeği parola yöneticisinde (5.3) | Peer ID değişir. Yayınlanmış istemciler gömülü adrese ulaşamaz, yeni adresi ancak `server.txt` üzerinden bulur. | Anahtarı kullanmak için alan adının trafiğini de ele geçirmek gerekir; bunu yapabilen biri `server.txt` ile istemcileri zaten kendi sunucusuna yönlendirebilir. Sunucu dosyaları ve kodların gizli kelimelerini görmez (`SECURITY.md`). Yenilemek pahalıdır (7.3), acil değildir. |
-| **İmzalama anahtarı** (minisign, `MINISIGN_SECRET_KEY`) | GitHub Actions secret'ında ve parola yöneticisinde | Anahtarı gömülü istemciler `-update` ile güncellenemez; kullanıcılar kurulum betiğiyle yeniden kurar. | Sürüm sayfasını değiştirebilen biri imzalı görünen bir güncelleme yayınlayabilir. Hemen yenileyin (7.2). |
+| **Server identity key** (`server.key` / `FT_IDENTITY_KEY`) | On the server in the `rendezvous-key` volume (`/data/server.key`); backed up in the password manager (5.3) | The Peer ID changes. Released clients cannot reach the embedded address and find the new one only through `server.txt`. | Using the key also requires taking over the domain's traffic; someone who can do that can already redirect clients to their own server through `server.txt`. The server does not see the files or the secret words of the codes (`SECURITY.md`). Rotating it is expensive (7.3) and not urgent. |
+| **Signing key** (minisign, `MINISIGN_SECRET_KEY`) | In the GitHub Actions secret and in the password manager | Clients with the key embedded cannot be updated with `-update`; users reinstall with the install script. | Someone who can change the release page can publish an update that looks signed. Rotate immediately (7.2). |
 
-Saklanması gerekmeyenler: Actions'taki `GITHUB_TOKEN` her çalıştırmada GitHub tarafından verilir; istemciler her açılışta yeni bir kimlik üretir ve hiçbir yere kaydetmez. Sunucudaki Cloudflare Tunnel kimlik dosyası (`/root/.cloudflared/<tünel>.json`) gizlidir ama Cloudflare panelinden yeniden üretilebilir.
+What does not need storing: the `GITHUB_TOKEN` in Actions is issued by GitHub on every run; clients generate a new identity on every start and store it nowhere. The Cloudflare Tunnel credentials file on the server (`/root/.cloudflared/<tunnel>.json`) is secret but can be regenerated from the Cloudflare dashboard.
 
-### 7.1 Kurallar
+### 7.1 Rules
 
-- Gizli bir anahtarı hiçbir sohbete, issue'ya, PR'a, log'a ya da ekran görüntüsüne koymayın — yapay zekâ asistanlarıyla yapılan sohbetler dahil; bu araçlar konuşmayı diskte ve sağlayıcıda düz metin saklar. Bir anahtar hakkında konuşurken adını ya da key ID'sini paylaşın.
-- Anahtarları deponun dışında, yalnızca sizin okuyabildiğiniz bir klasörde üretin (`umask 077`). `.gitignore` `*.key` dosyalarını dışarıda tutar, ama bu bir emniyet ağıdır, yöntem değil.
-- Minisign gizli anahtar dosyası iki satırdır: `untrusted comment: ...` ve anahtarın kendisi. Parola yöneticisine de GitHub secret'ına da ikisini birlikte koyun; minisign ilk satırı her zaman yorum olarak okur ve tek satırlık bir dosyayla imza atamaz.
-- GitHub secret'ı kaydedildikten sonra kimse, depo sahibi dahil, onu geri okuyamaz; okunabilir tek kopya parola yöneticisindekidir. Önce parola yöneticisine, sonra GitHub'a kaydedin.
-- GitHub'da **Settings → Secrets and variables → Actions** altında secret'lar *Secrets*, açık anahtar *Variables* sekmesine, ikisi de **Repository** düzeyinde (Environment altında değil) eklenir.
+- Never put a secret key in any chat, issue, PR, log or screenshot, including conversations with AI assistants; those tools store the conversation in plain text on disk and at the provider. When talking about a key, share its name or key ID.
+- Generate keys outside the repository, in a folder only you can read (`umask 077`). `.gitignore` excludes `*.key` files, but that is a safety net, not a method.
+- A minisign secret key file is two lines: `untrusted comment: ...` and the key itself. Put both in the password manager and in the GitHub secret; minisign always reads the first line as a comment and cannot sign with a one-line file.
+- Once a GitHub secret is saved, nobody, the repository owner included, can read it back; the only readable copy is the one in the password manager. Save it to the password manager first, then to GitHub.
+- Under **Settings → Secrets and variables → Actions** on GitHub, secrets go to the *Secrets* tab and the public key to the *Variables* tab, both at the **Repository** level (not under an Environment).
 
-### 7.2 İmzalama anahtarını yenileme
+### 7.2 Rotating the Signing Key
 
-1. Depo dışında yeni bir çift üretin:
+1. Generate a new pair outside the repository:
    ```bash
    umask 077; mkdir -p ~/puresend-signing && cd ~/puresend-signing
    minisign -G -W -p puresend.pub -s puresend.key
    ```
-2. `puresend.key` dosyasının iki satırını parola yöneticisinde eskisinin yerine koyun.
-3. GitHub'da `MINISIGN_SECRET_KEY` secret'ını (dosyanın tamamı) ve `FT_UPDATE_KEY` değişkenini (`puresend.pub` dosyasının ikinci satırı) güncelleyin.
-4. Yeni açık anahtarı `install.sh` (`PUBKEY`), `install.ps1` (`$pubKey`), `SECURITY.md` ve 6.2'deki doğrulama örneğine yazın; eski açık anahtarın depoda başka yerde kalmadığını `grep` ile denetleyin.
-5. Yeni bir sürüm yayınlayın (6.4) ve `~/puresend-signing` klasörünü silin.
+2. Replace the old one in the password manager with the two lines of `puresend.key`.
+3. On GitHub, update the `MINISIGN_SECRET_KEY` secret (the whole file) and the `FT_UPDATE_KEY` variable (the second line of `puresend.pub`).
+4. Write the new public key into `install.sh` (`PUBKEY`), `install.ps1` (`$pubKey`), `SECURITY.md` and the verification example in 6.2; check with `grep` that the old public key remains nowhere else in the repository.
+5. Publish a new release (6.4) and delete the `~/puresend-signing` folder.
 
-> ⚠️ Eski anahtarı gömülü istemciler, yeni anahtarla imzalanmış bir sürümü reddeder. Anahtar, onu taşıyan bir sürüm yayınlandıktan sonra değişirse o sürümün kullanıcıları `-update` ile güncelleyemez; sürüm notunda kurulum betiğiyle yeniden kurmalarını söyleyin. Anahtar sızdıysa bu bedel yine de ödenmelidir.
+> ⚠️ Clients with the old key embedded reject a release signed with the new key. If the key changes after a release that carries it is published, that release's users cannot update with `-update`; tell them in the release notes to reinstall with the install script. If the key leaked, this price still has to be paid.
 
-### 7.3 Sunucu anahtarını yenileme
+### 7.3 Rotating the Server Key
 
-1. Yeni anahtarı depo dışında üretin ve Peer ID'sini öğrenin; sunucu bir anahtar yolunda dosya bulamazsa yenisini üretir ve Peer ID'yi yazar:
+1. Generate the new key outside the repository and learn its Peer ID; if the server finds no file at a key path it generates a new one and prints the Peer ID:
    ```bash
-   umask 077; go run ./cmd/server -key ~/yeni-server.key -ws-port 18080 -health-addr ""
-   # "Peer ID: 12D3KooW..." satırını not edin, Ctrl+C ile durdurun
-   base64 -w0 ~/yeni-server.key   # parola yöneticisine bu çıktı
+   umask 077; go run ./cmd/server -key ~/new-server.key -ws-port 18080 -health-addr ""
+   # note the "Peer ID: 12D3KooW..." line, stop with Ctrl+C
+   base64 -w0 ~/new-server.key   # this output goes to the password manager
    ```
-2. Yeni adresi (`/dns4/<alan-adı>/tcp/443/tls/ws/p2p/<yeni Peer ID>`) `server.txt`'e **ekleyin**, eskisini henüz silmeyin.
-3. Sunucuda `FT_IDENTITY_KEY`'i yeni değere ayarlayıp (5.3) yeniden başlatın. Eski istemciler gömülü adrese ulaşamayınca `server.txt`'teki yeni adresi bulur.
-4. `FT_SERVER` değişkenini ya da `release.yml`'deki varsayılanı güncelleyip yeni bir sürüm yayınlayın (6.3, 6.4).
-5. Eski adresi `server.txt`'ten kaldırın ve `~/yeni-server.key` dosyasını silin.
+2. **Add** the new address (`/dns4/<domain>/tcp/443/tls/ws/p2p/<new Peer ID>`) to `server.txt`; do not delete the old one yet.
+3. Set `FT_IDENTITY_KEY` to the new value on the server (5.3) and restart it. Old clients that cannot reach the embedded address find the new address in `server.txt`.
+4. Update the `FT_SERVER` variable or the default in `release.yml` and publish a new release (6.3, 6.4).
+5. Remove the old address from `server.txt` and delete `~/new-server.key`.

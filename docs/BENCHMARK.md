@@ -1,48 +1,51 @@
-# PureSend — Performans Ölçümleri
+# PureSend — Performance Measurements
 
-Bu belgedeki her sayı ölçüldü ve komutuyla birlikte verildi; aynı makinede tekrar çalıştırılabilir. Ölçülmemiş olanlar en sonda ayrıca listelendi.
+[Türkçe](BENCHMARK_TR.md)
 
-> **Donanım ve ortam:** AMD Ryzen 7 5700X (8 çekirdek / 16 iş parçacığı), 32 GB RAM, NVMe SSD, Linux 6.8, Go 1.27. Ölçülen kod v2.0.0 (`27ff753`); bu belgeyle gelen değişiklikler yalnızca testlere ve arayüze dokunuyor, aktarım yoluna değil.
+Every number in this document was measured and is given together with its command; it can be run again on the same machine. What has not been measured is listed separately at the end.
+
+> **Hardware and environment:** AMD Ryzen 7 5700X (8 cores / 16 threads), 32 GB RAM, NVMe SSD, Linux 6.8, Go 1.27.1, on a desktop with other programs running. Measured code: v2.0.7 (`7024fdf`), on 2026-10-01.
 
 ---
 
-## 1. Özet
+## 1. Summary
 
-| Ölçüm | Sonuç | Kaynak |
+| Measurement | Result | Source |
 | :--- | :---: | :--- |
-| Uçtan uca aktarım hızı (loopback) | **360–390 MB/s** | `make bench-e2e`, 2–8 GiB |
-| Tepe bellek (RSS), gönderici / alıcı | **39–41 MB / 35–39 MB** | aynı ölçüm, 256 MiB – 8 GiB |
-| El sıkışma, iki tarafın CPU işi | **~0,6 ms** | `BenchmarkHandshake` |
-| Dilim sıkıştırma / açma | **~800 MB/s / ~225 MB/s** | `BenchmarkCompressChunk`, `BenchmarkDecompressChunk` |
+| End-to-end transfer speed (loopback) | **270–440 MB/s** | `make bench-e2e`, 256 MiB – 8 GiB |
+| Peak memory (RSS), sender / receiver | **36–39 MB / 33–36 MB** | same measurement, 256 MiB – 8 GiB |
+| Handshake, CPU work of both sides | **~0.65 ms** | `BenchmarkHandshake` |
+| Chunk compression / decompression | **~800 MB/s / ~225 MB/s** | `BenchmarkCompressChunk`, `BenchmarkDecompressChunk` |
 
-**Nasıl okunmalı:** Loopback'in kendi hat hızı yoktur. Bu yüzden uçtan uca ölçüm ağı değil, yazılımın koyduğu tavanı gösterir: şifreli libp2p bağlantısı, iki uçta SHA-256, diske yazma ve protokolün kendisi. 390 MB/s, gigabit Ethernet'in pratik tavanının (~118 MB/s) yaklaşık üç katıdır. Yani bu donanımda yerel ağdaki darboğaz ağın kendisi olur. Daha yavaş bir işlemci ya da diskte bu tavan düşer.
+**How to read it:** Loopback has no wire speed of its own. The end-to-end measurement therefore shows not the network but the ceiling the software sets: the encrypted libp2p connection, SHA-256 on both ends, writing to disk and the protocol itself. Even the slowest run (269 MB/s) is more than twice the practical ceiling of gigabit Ethernet (~118 MB/s), so on this hardware the bottleneck on a local network is the network itself. On a slower CPU or disk this ceiling drops. The spread between runs is wide (section 2), which is why a range is given and not a single figure.
 
 ---
 
-## 2. Uçtan uca ölçüm (`make bench-e2e`)
+## 2. End-to-end measurement (`make bench-e2e`)
 
-[`scripts/bench-e2e.sh`](../scripts/bench-e2e.sh) programı bir kullanıcının çalıştırdığı gibi ölçer:
+[`scripts/bench-e2e.sh`](../scripts/bench-e2e.sh) measures the program the way a user runs it:
 
-1. Yerel bir buluşma sunucusu başlatır (`puresend-server`, TCP, loopback).
-2. `/dev/urandom`'dan istenen boyutta bir dosya üretir. Rastgele veri sıkışmadığı için her bayt bağlantıdan geçer.
-3. Göndericiyi başlatır ve dosyaları okuyup özetini çıkarmasını bekler (`files ready`). Böylece ön hazırlık süresi ölçüme girmez.
-4. Alıcıyı başlatır ve süresini ölçer: başlangıç, oda sorgusu, bağlantı, el sıkışma, aktarım ve doğrulama dahil.
-5. Bağlantının doğrudan kurulduğunu ve iki dosyanın SHA-256 özetlerinin aynı olduğunu kontrol eder.
-6. İki sürecin tepe belleğini GNU `time` ile raporlar.
+1. It starts a local rendezvous server (`puresend-server`, TCP, loopback).
+2. It generates a file of the requested size from `/dev/urandom`. Random data does not compress, so every byte crosses the connection.
+3. It starts the sender and waits for it to finish reading and hashing the files (`files ready`), so preparation time does not enter the measurement.
+4. It starts the receiver and times it: startup, room lookup, connection, handshake, transfer and verification included.
+5. It checks that the connection was established directly and that the SHA-256 digests of the two files are identical.
+6. It reports the peak memory of the two processes with GNU `time`.
 
-Sonuçlar (her satır ayrı bir çalıştırma):
+Results (each row is a separate run):
 
-| Veri | Alıcı süresi | Hız | Tepe RSS, gönderici | Tepe RSS, alıcı |
+| Data | Receiver time | Speed | Peak RSS, sender | Peak RSS, receiver |
 | :---: | :---: | :---: | :---: | :---: |
-| 256 MiB | 0,88 s | 306 MB/s | 39 MB | 35 MB |
-| 2 GiB | 5,51 s | 390 MB/s | 40 MB | 37 MB |
-| 2 GiB | 5,99 s | 359 MB/s | 41 MB | 36 MB |
-| 2 GiB | 5,68 s | 378 MB/s | 41 MB | 37 MB |
-| 8 GiB | 23,85 s | 360 MB/s | 41 MB | 39 MB |
+| 256 MiB | 0.99 s | 271 MB/s | 36 MB | 33 MB |
+| 2 GiB | 6.70 s | 320 MB/s | 38 MB | 34 MB |
+| 2 GiB | 5.72 s | 375 MB/s | 39 MB | 35 MB |
+| 2 GiB | 6.53 s | 329 MB/s | 38 MB | 35 MB |
+| 8 GiB | 31.93 s | 269 MB/s | 38 MB | 36 MB |
 
-- **Bellek dosya boyutuyla büyümüyor.** 32 kat büyük dosyada tepe RSS birkaç MB oynuyor. Dosyalar 32 KB'lık dilimlerle okunup yazılıyor ve hiçbir zaman belleğe bütün olarak alınmıyor.
-- **256 MiB'da hız daha düşük görünüyor**, çünkü sürenin sabit kısmı (süreç başlangıcı, sunucu bağlantısı, el sıkışma) kısa bir aktarımda oransal olarak daha büyük.
-- Alıcı veriyi işletim sisteminin sayfa önbelleğine yazıyor. Diske gerçekten yazılma hızı ayrı bir konudur.
+- **Memory does not grow with file size.** With a file 32 times larger, peak RSS moves by a few MB. Files are read and written in 32 KB chunks and are never held in memory whole.
+- **The spread between runs is large, and it is the machine, not the code.** A second batch the same day gave 272–437 MB/s on v2.0.7 (2 GiB: 416, 401, 309; 8 GiB: 437; 256 MiB: 272). Binaries built from v2.0.0 (`27ff753`) and run in alternation with the v2.0.7 ones gave 302–458 MB/s, so there is no regression between the two versions. We did not isolate the cause of the spread; other processes and the state of the page cache and disk write-back are the suspects.
+- **At 256 MiB the speed is usually lower**, because the fixed part of the time (process startup, server connection, handshake) is proportionally larger in a short transfer.
+- The receiver writes the data into the operating system's page cache. The speed at which it actually reaches the disk is a separate matter.
 
 ```bash
 make bench-e2e                       # 2 GiB
@@ -51,34 +54,34 @@ FT_BENCH_SIZE_MB=8192 make bench-e2e # 8 GiB
 
 ---
 
-## 3. Mikro-benchmark'lar
+## 3. Micro-benchmarks
 
-Bunlar tek bir fonksiyonu ölçer. Asıl işleri gerilemeleri yakalamaktır; kullanıcının hissettiği hızı uçtan uca ölçüm gösterir.
+These measure a single function. Their real job is to catch regressions; the speed a user feels is shown by the end-to-end measurement.
 
 ```bash
 make bench   # go test -run '^$' -bench . -benchmem ./...
 ```
 
-Üç çalıştırmanın aralığı:
+Range of three runs:
 
-| Benchmark | Süre | Hız | Bellek | Tahsis |
+| Benchmark | Time | Speed | Memory | Allocations |
 | :--- | :---: | :---: | :---: | :---: |
-| `BenchmarkCompressChunk` | 39–41 µs | 784–811 MB/s | ~58 B | 1 |
-| `BenchmarkDecompressChunk` | 139–146 µs | 220–231 MB/s | ~125 B | 3 |
-| `BenchmarkHandshake` | 0,57–0,65 ms | — | ~30 KB | 370 |
-| `BenchmarkSafeJoin` | 785–908 ns | — | 240 B | 5 |
-| `BenchmarkValidDigest` | 29 ns | — | 0 B | 0 |
-| `BenchmarkClean_CleanText` | 615–690 ns | — | 120 B | 4 |
-| `BenchmarkClean_UnsafeText` | 362–466 ns | — | 56 B | 3 |
+| `BenchmarkCompressChunk` | 39–40 µs | 792–812 MB/s | ~58 B | 1 |
+| `BenchmarkDecompressChunk` | 140–146 µs | 219–228 MB/s | ~125 B | 3 |
+| `BenchmarkHandshake` | 0.63–0.68 ms | — | ~30 KB | 373–374 |
+| `BenchmarkSafeJoin` | 621–808 ns | — | 240 B | 5 |
+| `BenchmarkValidDigest` | 25–26 ns | — | 0 B | 0 |
+| `BenchmarkClean_CleanText` | 705–803 ns | — | 120 B | 4 |
+| `BenchmarkClean_UnsafeText` | 384–414 ns | — | 56 B | 3 |
 
-- **Sıkıştırma** metin benzeri bir 32 KB dilim üzerinde ölçülür. Sıkıştırma `flate.HuffmanOnly` ile yapılır, çünkü eşleşme aramayan bu mod hat hızının üzerinde çalışır. Küçülmeyen dilim (JPEG, MP4, ZIP gibi) olduğu gibi gönderilir, yani sıkışmayan veride bağlantı üzerinden hiçbir şey büyümez.
-- **El sıkışma** iki tarafın PAKE ve karşılıklı onay adımlarını bellekteki bir boru üzerinden birlikte ölçer. Gerçek bir bağlantıda buna ağın bir iki gidiş-dönüşü eklenir ve süreyi o belirler.
-- **Güvenlik denetimleri** (`SafeJoin`, `Clean`) mikro saniyenin altındadır ve dosya başına bir kez çalışır, bayt başına değil. Aktarım hızına etkileri ölçülemeyecek kadar küçüktür.
+- **Compression** is measured on a text-like 32 KB chunk. It uses `flate.HuffmanOnly`, because this mode, which does not search for matches, runs above line speed. A chunk that does not shrink (JPEG, MP4, ZIP and the like) is sent as it is, so nothing grows on the wire for incompressible data.
+- **The handshake** measures the PAKE and mutual confirmation steps of both sides together over an in-memory pipe. On a real connection one or two network round trips come on top, and they decide the time.
+- **The security checks** (`SafeJoin`, `Clean`) are below a microsecond and run once per file, not per byte. Their effect on transfer speed is too small to measure.
 
 ---
 
-## 4. Henüz ölçülmeyenler
+## 4. Not Measured Yet
 
-- **Gerçek ağ üzerinde LAN hızı:** Loopback tavanı 360–390 MB/s. İki makine arasında gigabit ya da 2,5G bir bağlantıda ölçülmedi.
-- **İnternet üzerinden hız ve delik açma başarı oranı:** Farklı ev, mobil (CGNAT) ve kurumsal ağ çiftlerinde DCUtR'nin ne sıklıkla doğrudan bağlantı kurabildiği ölçülmedi.
-- **Röle üzerinden hız:** Röle yedeği [`test/relay`](../test/relay/netns-relay-test.sh) ile her commit'te doğruluk açısından test ediliyor, ama hız ölçümü yapılmıyor. Üretimdeki sunucu röle bağlantısı başına veri ve süre sınırı koyar (`-relay-data`, `-relay-duration`).
+- **LAN speed over a real network:** The loopback ceiling is 270–440 MB/s. It has not been measured between two machines over a gigabit or 2.5G link.
+- **Speed over the internet and the hole-punching success rate:** How often DCUtR manages a direct connection across different home, mobile (CGNAT) and corporate network pairs has not been measured.
+- **Speed over the relay:** The relay fallback is tested for correctness on every commit with [`test/relay`](../test/relay/netns-relay-test.sh), but its speed is not measured. The production server limits each relayed connection in data and time (`-relay-data`, `-relay-duration`).

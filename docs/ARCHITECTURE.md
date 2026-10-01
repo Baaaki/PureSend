@@ -1,130 +1,134 @@
-# PureSend — Mimari ve Algoritma Akışı (Architecture & Protocol Spec)
+# PureSend — Architecture and Protocol Flow
 
-Bu belge; PureSend eşler arası (P2P) dosya aktarım sisteminin ağ topolojisini, şifreleme mekanizmalarını ve algoritma akışını şematik olarak açıklar.
+[Türkçe](ARCHITECTURE_TR.md)
+
+This document describes the network topology, the cryptography and the algorithm flow of PureSend's peer-to-peer (P2P) file transfer, with diagrams.
 
 ---
 
-## 1. Sistem ve Ağ Topolojisi (System Topology)
+## 1. System and Network Topology
 
-PureSend, merkezi sunucularda veri depolamadan doğrudan cihazdan cihaza (uçtan uca şifreli P2P) transfer sağlar. Buluşma sunucusu yalnızca eşleri tanıştırır; dosyaları göremez ve oda kodunun gizli kelimelerini hiç öğrenmez:
+PureSend moves files straight from device to device, end to end encrypted, and stores nothing on a central server. The rendezvous server only introduces the two peers: it cannot see the files and never learns the secret words of a room code.
 
 ```mermaid
 flowchart TB
-    subgraph Users["Kullanıcılar"]
-        SenderUser["Gönderici (Kullanıcı A)"]
-        ReceiverUser["Alıcı (Kullanıcı B)"]
+    subgraph Users["Users"]
+        SenderUser["Sender (User A)"]
+        ReceiverUser["Receiver (User B)"]
     end
 
     subgraph PureSendSystem["PureSend CLI"]
-        SenderApp["Gönderici Düğüm (Client A)"]
-        ReceiverApp["Alıcı Düğüm (Client B)"]
+        SenderApp["Sender node (Client A)"]
+        ReceiverApp["Receiver node (Client B)"]
     end
 
-    subgraph Infrastructure["Sinyal Altyapısı"]
+    subgraph Infrastructure["Signaling infrastructure"]
         CFEdge["Cloudflare Edge (WSS / 443)"]
-        RendezvousServer["Buluşma & Röle Sunucusu (cmd/server:8080)"]
+        RendezvousServer["Rendezvous & Relay server (cmd/server:8080)"]
     end
 
-    SenderUser -->|"Dosya seçer, oda kodunu okur"| SenderApp
-    ReceiverUser -->|"Oda kodunu girer & onaylar"| ReceiverApp
+    SenderUser -->|"Picks files, reads out the room code"| SenderApp
+    ReceiverUser -->|"Enters the room code & approves"| ReceiverApp
 
-    SenderApp <-->|"1. Sinyalleşme & Oda Kaydı (WSS)"| CFEdge
-    ReceiverApp <-->|"1. Oda Çözümleme (WSS)"| CFEdge
+    SenderApp <-->|"1. Signaling & room registration (WSS)"| CFEdge
+    ReceiverApp <-->|"1. Room lookup (WSS)"| CFEdge
     CFEdge <-->|"ws://localhost:8080"| RendezvousServer
 
-    SenderApp <-.->|"2. Doğrudan P2P Tüneli (DCUtR / TCP / QUIC)"| ReceiverApp
-    SenderApp <-.->|"3. Fallback: Circuit Relay v2 (Yalnızca delik açılamazsa)"| RendezvousServer
-    ReceiverApp <-.->|"3. Fallback: Circuit Relay v2 (Yalnızca delik açılamazsa)"| RendezvousServer
+    SenderApp <-.->|"2. Direct P2P tunnel (DCUtR / TCP / QUIC)"| ReceiverApp
+    SenderApp <-.->|"3. Fallback: Circuit Relay v2 (only if no hole can be punched)"| RendezvousServer
+    ReceiverApp <-.->|"3. Fallback: Circuit Relay v2 (only if no hole can be punched)"| RendezvousServer
 ```
 
 ---
 
-## 2. Uçtan Uca Algoritma ve Protokol Akışı (Sequence Diagram)
+## 2. End-to-End Algorithm and Protocol Flow (Sequence Diagram)
 
-PureSend protokolünün 4 ana adımı (Sinyal, NAT Delme, PAKE Doğrulama, Akış):
+The four stages of the PureSend protocol: signaling, NAT traversal, PAKE authentication, streaming.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant S as Gönderici (Sender)
-    participant Rnd as Buluşma Sunucusu (Rendezvous)
-    participant R as Alıcı (Receiver)
+    participant S as Sender
+    participant Rnd as Rendezvous Server
+    participant R as Receiver
 
-    Note over S,Rnd: 1. Oda Eşleme (Discovery)
-    S->>Rnd: WSS Bağlantısı & Oda Kaydı (yalnızca adresler, PeerID_S)
-    Rnd-->>S: Oda numarası "42" (TTL: en fazla 1 saat)
-    Note over S: Gizli kelimeleri kendisi seçer → kod "kiraz-liman-42"
-    S-->>R: Kod sesli/yazılı iletilir (sunucu dışından)
-    R->>Rnd: WSS Bağlantısı & Oda Sorgulama (yalnızca "42")
-    Rnd-->>R: Gönderici Adresleri (PeerID_S, Multiaddrs)
+    Note over S,Rnd: 1. Room matching (Discovery)
+    S->>Rnd: WSS connection & room registration (addresses only, PeerID_S)
+    Rnd-->>S: Room number "42" (TTL: one hour at most)
+    Note over S: Picks the secret words itself → code "kiraz-liman-42"
+    S-->>R: Code is passed on by voice or text (outside the server)
+    R->>Rnd: WSS connection & room lookup (only "42")
+    Rnd-->>R: Sender addresses (PeerID_S, multiaddrs)
 
-    Note over S,R: 2. DCUtR ile NAT Delme (Hole Punching)
-    R->>Rnd: Röle Üzerinden Göndericiye Köprü Kur
-    Rnd->>S: Köprü Bağlantısını İlet
-    S->>R: DCUtR Port Eşleme Senkronizasyonu
-    S-->>R: Doğrudan P2P Soketi Açıldı (Sunucu Devre Dışı!)
+    Note over S,R: 2. NAT traversal (Hole Punching) with DCUtR
+    Note over S,R: Each peer first learns the public address its router gave its QUIC socket (STUN, refreshed every 15 s) and offers that
+    R->>Rnd: Open a bridge to the sender through the relay
+    Rnd->>S: Forward the bridged connection
+    S->>R: DCUtR port-mapping synchronization
+    S-->>R: Direct P2P socket opened (server out of the data path!)
 
-    Note over S,R: 3. Kodun Tamamıyla Kimlik Doğrulama (PAKE)
-    R->>S: PAKE Mesaj 1 (P-256, parola: kodun tamamı)
-    S->>R: PAKE Mesaj 2
-    Note over S,R: Ortak anahtar türetilir (Peer ID'ler oturuma bağlanır)
+    Note over S,R: 3. Authentication with the whole code (PAKE)
+    R->>S: PAKE message 1 (P-256, password: the whole code)
+    S->>R: PAKE message 2
+    Note over S,R: Shared key derived (both Peer IDs bound to the session)
     R->>S: ConfirmReceiver (HMAC-SHA256)
-    S->>R: ConfirmSender — yalnızca alıcınınki doğruysa
-    Note over S: 3 yanlış kodda oda kapanır
+    S->>R: ConfirmSender — only if the receiver's tag was right
+    Note over S: The room closes after 3 wrong codes
 
-    Note over S,R: 4. Manifest, Onay ve Akış Transferi
-    S->>R: Offer / Manifest (Dosya listesi, boyutlar, SHA-256)
-    R-->>S: Transfer Ack: Accepted (Kaldığı yer / resume offseti)
-    
-    loop Her 32 KB Dilim İçin
-        S->>R: 32 KB Dilim (küçülüyorsa DEFLATE HuffmanOnly ile sıkıştırılmış)
-        R->>R: Diske Yaz (.part) & Dosyanın SHA-256 Özetine Ekle
+    Note over S,R: 4. Manifest, approval and streaming
+    S->>R: Offer / Manifest (file list, sizes, SHA-256)
+    Note over R: Manifest validated, free disk space checked, the user approves the file list (nothing is written before this)
+    R-->>S: Transfer Ack: Accepted (resume offsets)
+
+    loop For every 32 KB chunk
+        S->>R: 32 KB chunk (DEFLATE HuffmanOnly if it shrinks)
+        R->>R: Write to disk (.part) & add to the file's SHA-256
     end
-    Note over R: Dosya bitince SHA-256 karşılaştırılır; eşleşirse kalıcı adına taşınır
+    Note over R: When a file ends its SHA-256 is compared, and on a match it moves to its final name
 
-    R->>S: Final Ack (Transfer Başarılı)
+    R->>S: Final Ack (transfer succeeded)
 ```
 
 ---
 
-## 3. Ağ Taşıyıcı ve Fallback Karar Ağacı (Traversal Flowchart)
+## 3. Transport and Fallback Decision Tree (Traversal Flowchart)
 
-Bağlantı koşullarına göre çalışma zamanı rota seçimi:
+How the route is chosen at runtime, depending on the connection:
 
 ```mermaid
 flowchart TD
-    Start(["Transfer Başlatıldı"]) --> DirectLAN{"Aynı Yerel Ağda (LAN) mı?"}
-    
-    DirectLAN -- "Evet" --> UseLAN["Doğrudan LAN Soketi (hız: ağın hat hızı)"]
-    DirectLAN -- "Hayır" --> HolePunch{"DCUtR Delik Açma Başarılı mı?<br/>(Konik NAT / Port Eşleme)"}
-    
-    HolePunch -- "Evet (Varsayılan)" --> UseDirectWAN["Doğrudan WAN P2P Tüneli<br/>(Veri sunucuya uğramaz, hat sınırı hız)"]
-    HolePunch -- "Hayır (Simetrik NAT)" --> RelayFallback["Circuit Relay v2 Köprüsü<br/>(Şifreli yedek hat - Hız/kota sınırlı)"]
+    Start(["Transfer started"]) --> DirectLAN{"On the same local network (LAN)?"}
 
-    UseLAN --> StartCrypto["PAKE (P-256) El Sıkışması"]
+    DirectLAN -- "Yes" --> UseLAN["Direct LAN socket (speed: the link's line rate)"]
+    DirectLAN -- "No" --> HolePunch{"DCUtR hole punching succeeded?<br/>(cone NAT / port mapping)"}
+
+    HolePunch -- "Yes (default)" --> UseDirectWAN["Direct WAN P2P tunnel<br/>(data never touches the server, line-rate limited)"]
+    HolePunch -- "No (symmetric NAT)" --> RelayFallback["Circuit Relay v2 bridge<br/>(encrypted fallback, speed and quota limited)"]
+
+    UseLAN --> StartCrypto["PAKE (P-256) handshake"]
     UseDirectWAN --> StartCrypto
     RelayFallback --> StartCrypto
 
-    StartCrypto --> VerifyAuth{"Parola / Kod Eşleşti mi?"}
-    VerifyAuth -- "Evet" --> TransferStream["32 KB Dilim Akışı + DEFLATE + Dosya Başına SHA-256"]
-    VerifyAuth -- "Hayır" --> DropConn["Reddet — 3. yanlış kodda oda kapanır"]
+    StartCrypto --> VerifyAuth{"Password / code matched?"}
+    VerifyAuth -- "Yes" --> TransferStream["32 KB chunk stream + DEFLATE + per-file SHA-256"]
+    VerifyAuth -- "No" --> DropConn["Reject — the room closes on the 3rd wrong code"]
 ```
 
 ---
 
-## 4. Temel Algoritma Prensipleri
+## 4. Core Algorithm Principles
 
-1. **Güvenilmeyen Buluşma Sunucusu:**
-   * El sıkışma `schollz/pake` kütüphanesinin SPAKE2 tarzı değişimidir; RFC 9382 SPAKE2 ya da CPace değildir. Güvenliği taşıyan kısımlar (iki kimliğin anahtara bağlanması ve karşılıklı onay etiketleri) projenin kendi kodudur; gerekçe `internal/transfer/auth.go` içindedir.
-   * Oda kodu iki parçadır: `kiraz-liman-42` kodunda `42` sunucunun verdiği, herkese açık oda numarasıdır (nameplate); `kiraz-liman` göndericinin kendi seçtiği gizli kısımdır (16 bit) ve sunucuya hiç gönderilmez.
-   * Sunucu dosya içeriğini veya dosya adlarını göremez. Göndericinin yerine kendi düğümünü koymak ya da alıcı gibi davranmak için gizli kelimeleri tahmin etmesi gerekir: her deneme bir el sıkışmadır, başarısızlık görünür, ve gönderici 3 yanlış koddan sonra odayı kapatır.
-   * İstemciler PAKE el sıkışmasında iki Peer ID'yi de anahtara bağlar; arada mesaj taşıyan bir eş iki ucu birbirine bağlayamaz.
-2. **Sabit Bellekli Akış ($O(1)$ RAM):**
-   * Dosyalar belleğe yüklenmez; sabit 32 KB dilimler (chunks) halinde okunur, küçülüyorsa DEFLATE (`flate.HuffmanOnly`) ile sıkıştırılır, küçülmüyorsa olduğu gibi gönderilir.
-   * Alıcı tarafında her dilim diske yazılırken dosyanın SHA-256 özetine eklenir; özet dosya bitince bir kez karşılaştırılır.
-3. **Kaldığı Yerden Devam (Resume):**
-   * Bağlantı koptuğunda alıcı, `.puresend-partial` içindeki `.part` dosyasının boyutunu göndericiye bildirir; aktarım yalnızca eksik kalan bayttan devam eder.
-   * "Bu dosya bende zaten var" cevabı yalnızca yarıda kalmış bir PureSend aktarımının bitirdiği dosyalar için verilir; gönderici hedef klasörde başka dosyaların varlığını bu yolla sorgulayamaz.
-4. **Dosya Sistemi Güvenliği:**
-   * Gelen manifestteki tüm yollar `safeJoin` denetiminden geçer; mutlak yollar (`/etc/passwd`), dizin atlamalar (`../`), ayrılmış `.puresend-partial` klasörü ve Windows aygıt adları (`CON`, `PRN`, `AUX`) onarılmaz, reddedilir.
-   * Hedef klasör ev klasörünün kendisi ya da üstündeki bir klasör olamaz; hedefteki sembolik bağlantıların içinden yazılmaz; var olan hiçbir dosyanın üzerine yazılmaz.
+1. **An Untrusted Rendezvous Server:**
+   * The handshake is the SPAKE2-style exchange of the `schollz/pake` library; it is not RFC 9382 SPAKE2 or CPace. The parts that carry the security (binding both identities to the key and the mutual confirmation tags) are the project's own code; the rationale is in `internal/transfer/auth.go`.
+   * A room code has two parts. In `kiraz-liman-42`, `42` is the public room number (nameplate) that the server hands out; `kiraz-liman` is the secret part the sender chose itself (16 bits) and is never sent to the server.
+   * The server cannot see file contents or file names. To put its own node in the sender's place, or to act as the receiver, it would have to guess the secret words: every attempt is a handshake, every failure is visible, and the sender closes the room after 3 wrong codes.
+   * During the PAKE handshake the clients bind both Peer IDs into the key, so a peer carrying messages in between cannot join the two ends to each other.
+2. **Constant-Memory Streaming ($O(1)$ RAM):**
+   * Files are never loaded into memory. They are read in fixed 32 KB chunks, compressed with DEFLATE (`flate.HuffmanOnly`) if that makes them smaller, and sent as they are if it does not.
+   * On the receiving side every chunk is added to the file's SHA-256 as it is written to disk; the digest is compared once, when the file ends.
+3. **Resume:**
+   * When a connection drops, the receiver tells the sender the size of the `.part` file in `.puresend-partial`; the transfer continues from the missing byte only.
+   * The "I already have this file" answer is given only for files that an interrupted PureSend transfer finished; a sender cannot use it to probe the destination folder for other files.
+4. **Filesystem Safety:**
+   * Every path in an incoming manifest goes through the `safeJoin` check. Absolute paths (`/etc/passwd`), directory escapes (`../`), the reserved `.puresend-partial` folder and Windows device names (`CON`, `PRN`, `AUX`) are not repaired, they are rejected.
+   * The destination cannot be the home folder itself or a folder above it; nothing is written through symbolic links in the destination; no existing file is overwritten.
