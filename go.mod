@@ -10,13 +10,14 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/libp2p/go-libp2p v0.50.0
+	github.com/libp2p/go-libp2p v0.51.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/pion/stun/v4 v4.0.1
 	github.com/prometheus/client_golang v1.24.1
 	github.com/schollz/pake/v3 v3.2.0
 	go.uber.org/fx v1.24.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -96,7 +97,7 @@ require (
 	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.62.0 // indirect
+	github.com/quic-go/quic-go v0.64.1 // indirect
 	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
@@ -111,7 +112,6 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260922173722-c6096d2f4a49 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
