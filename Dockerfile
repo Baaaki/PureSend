@@ -7,7 +7,7 @@
 # Stage 1: build. The Go version matches the toolchain line in go.mod; CI
 # and the release build use the same one. Pinned to the patch release so
 # a builder with an older image cached still gets the fixes.
-FROM golang:1.27.1-alpine3.24 AS build
+FROM golang:1.27.3-alpine3.24 AS build
 WORKDIR /app
 
 # Download dependencies first so this layer is cached across code changes.
