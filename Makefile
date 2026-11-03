@@ -18,7 +18,7 @@ GO ?= go
 # fails on newer standard library code in ways that look like bugs in the
 # project ("undefined: rand", "file requires newer Go version"). Pinned to
 # the versions CI uses.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 GOVULNCHECK_VERSION   ?= v1.8.0
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
