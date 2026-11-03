@@ -6,6 +6,76 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.8] - 2026-11-03
+
+### Added
+
+- **Dual-stack IPv6 listener support on the server.** `puresend-server` now
+  binds IPv6 (`/ip6/::/tcp/...` and `/ip6/::/udp/.../quic-v1`) alongside IPv4
+  by default for both WebSocket and raw TCP/QUIC endpoints.
+- **Headless safety warnings and manifest truncation.** Headless receive mode
+  now warns when an incoming transfer includes hidden dot-files or dot-folders,
+  warns when a relayed transfer exceeds the relay fallback data limit, and
+  summarizes manifests larger than 20 files cleanly.
+- **Configurable `-max-rooms` propagation.** The server's `-max-rooms` flag now
+  scales both the libp2p circuit v2 relay reservation limits and the connection
+  resource manager ceilings instead of using the hardcoded default.
+
+### Fixed
+
+- **TUI `p2p.Node` resource leak and stale-event panic.** Pressing `Esc` on the
+  file picker or code entry screens now properly tears down the background P2P
+  node, and stale events arriving after a session reset or transfer decline are
+  safely ignored instead of panicking or flashing an error screen.
+- **Disk space pre-check on non-existent output directories.**
+  `transfer.CheckAvailableSpace` now walks up to the nearest existing ancestor
+  directory when `-out` (or the default `~/Downloads/PureSend` folder) has not
+  been created yet, and clamps unsigned block arithmetic to prevent `int64`
+  overflow on large network filesystems.
+- **Transfer decline race condition.** Declining an incoming transfer in
+  headless or TUI mode now waits for the refusal acknowledgment frame to flush
+  before closing the stream and P2P node, ensuring the sender reliably receives
+  `ErrTransferDeclined`.
+- **Headless `Ctrl+C` responsiveness at confirmation prompt.** `askYesNo` now
+  selects on context cancellation so `SIGINT` (`Ctrl+C`) exits immediately
+  without waiting for `Enter`.
+- **Top-level filename collisions and duplicate re-downloads on resume.**
+  `transfer.Collect` now disambiguates colliding top-level file and folder
+  names selected from different directories (`name (1).ext`), and `.done`
+  markers record the actual saved path so resumed transfers do not re-download
+  files that were renamed by `place()`.
+- **Bounded folder size traversal in TUI.** Picking a folder with `f` now
+  rejects unsafe directories (such as `$HOME` or hidden dot-folders) and bounds
+  `folderSize` traversal by entry count and duration so large directories never
+  freeze the interface.
+- **Flaky integration stream opening over limited relay connections.** Raw test
+  hosts in `guesslimit_test` and `singleuse_test` now allow limited relay
+  connections when racing direct and circuit addresses.
+- **Debian package build script (`scripts/build-deb.sh`).** Always compiles a
+  fresh release-configured client binary with `FT_SERVER` and `FT_UPDATE_KEY`
+  instead of reusing an unconfigured binary from `bin/puresend`.
+
+### Security
+
+- **Rendezvous lookup table memory cap and hard rate-limit ceiling.** Bounded
+  the per-peer lookup tracker (`maxLookupPeers = 10,000`), throttled full-table
+  expiration sweeps to once per second, and added a hard global miss ceiling
+  (`maxGlobalMissesHard`) so attackers minting fresh `peer.ID` identities
+  cannot exhaust server memory or bypass rate limits to enumerate rooms.
+- **Room TTL preservation across `Unregister` + `Register`.** The rendezvous
+  server now retains original room creation timestamps for retired rooms so
+  repeatedly unregistering and re-registering a nameplate cannot extend a room
+  past `RoomTTL`, and transient relay reservation failures during reconnects no
+  longer unregister an existing room.
+- **Symlink resolution for non-existent destination subdirectories.**
+  `transfer.CheckDestination` now resolves symlinks on existing ancestor
+  components when the leaf target directory does not exist yet, and blocks
+  destinations inside hidden home subdirectories (such as `~/.ssh`).
+- **Bounded extraction and stricter asset filtering in `internal/update`.**
+  Wrapped archive extraction streams in `io.LimitReader` (`maxArchiveBytes`) to
+  guard against decompression bombs and excluded server archives, signatures
+  (`.minisig`, `.sig`, `.asc`), and OS installer packages from `FindAsset`.
+
 ## [2.0.7] - 2026-09-28
 
 ### Added
