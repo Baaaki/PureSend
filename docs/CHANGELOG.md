@@ -6,7 +6,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.0.8] - 2026-11-03
+## [2.0.9] - 2026-11-03
 
 ### Added
 
@@ -57,6 +57,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **Upgraded Go toolchain (`go1.27.3`) and `golang.org/x/net` (`v0.60.0`).**
+  Resolved 10 standard-library and `x/net` advisories reported by `govulncheck`
+  (`GO-2026-6809`, `GO-2026-6617`, `GO-2026-6613`, `GO-2026-6612`,
+  `GO-2026-6611`, `GO-2026-6610`, `GO-2026-6608`, `GO-2026-6607`,
+  `GO-2026-6605`, and `GO-2026-6603`) across `crypto/x509`, `crypto/tls`,
+  `net/textproto`, and `net/http`.
 - **Rendezvous lookup table memory cap and hard rate-limit ceiling.** Bounded
   the per-peer lookup tracker (`maxLookupPeers = 10,000`), throttled full-table
   expiration sweeps to once per second, and added a hard global miss ceiling
