@@ -173,12 +173,29 @@ func atOrAboveHome(dest string) bool {
 	}
 	// dest is at or above home exactly when home is at or below dest.
 	rel, err := filepath.Rel(dest, home)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return true
+	}
+	// Hidden folders inside home (such as ~/.ssh or ~/.config) are equally unsafe.
+	if fromHome, err := filepath.Rel(home, dest); err == nil {
+		first, _, _ := strings.Cut(fromHome, string(filepath.Separator))
+		if strings.HasPrefix(first, ".") && first != "." && first != ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // canonical is p made absolute, with any symbolic links in it resolved as
 // far as they exist, so that a link to the home folder is the home folder.
 func canonical(p string) (string, error) {
+	return canonicalDepth(p, 0)
+}
+
+func canonicalDepth(p string, depth int) (string, error) {
+	if depth > 40 {
+		return "", errors.New("too many levels of symbolic links")
+	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		return "", err
@@ -186,7 +203,35 @@ func canonical(p string) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		return resolved, nil
 	}
-	return abs, nil
+	cur := abs
+	var tail []string
+	for {
+		if target, err := os.Readlink(cur); err == nil {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(cur), target)
+			}
+			base, err := canonicalDepth(target, depth+1)
+			if err != nil {
+				return "", err
+			}
+			for i := len(tail) - 1; i >= 0; i-- {
+				base = filepath.Join(base, tail[i])
+			}
+			return base, nil
+		}
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(tail) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, tail[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs, nil
+		}
+		tail = append(tail, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 // checkNoLinks refuses a target whose folders below outDir include a

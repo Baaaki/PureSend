@@ -12,6 +12,8 @@ import (
 	"puresend/internal/p2p"
 	"puresend/internal/rendezvous"
 	"puresend/internal/transfer"
+
+	"github.com/libp2p/go-libp2p/core/network"
 )
 
 // heldStream lets a handshake run up to the receiver's proof of the code
@@ -85,7 +87,7 @@ func TestGuessesHeldOpenTogetherShareTheLimit(t *testing.T) {
 	}
 	attempts := make([]*attempt, len(codes))
 	for i, code := range codes {
-		s, err := guesser.NewStream(ctx, info.ID, transfer.ProtocolID)
+		s, err := guesser.NewStream(network.WithAllowLimitedConn(ctx, "test"), info.ID, transfer.ProtocolID)
 		if err != nil {
 			t.Fatal(err)
 		}

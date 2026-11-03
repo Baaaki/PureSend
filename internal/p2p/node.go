@@ -608,13 +608,16 @@ func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
 	// Register the room before reserving the relay slot: the server's
 	// relay only serves peers with an active room, so the reservation
 	// would otherwise be refused by its ACL.
+	isNew := nameplate == ""
 	nameplate, err := rendezvous.Register(ctx, n.host, server.ID, nameplate, addrs)
 	if err != nil {
 		return "", err
 	}
 	if _, err := relayclient.Reserve(ctx, n.host, server); err != nil {
-		// Do not leave behind a room nobody can reach.
-		_ = rendezvous.Unregister(ctx, n.host, server.ID, nameplate)
+		if isNew {
+			// Do not leave behind a fresh room nobody can reach.
+			_ = rendezvous.Unregister(ctx, n.host, server.ID, nameplate)
+		}
 		return "", fmt.Errorf("the meeting point refused to hold a slot for us: %w", err)
 	}
 	return nameplate, nil

@@ -577,6 +577,27 @@ func Get(lang Lang) *Messages {
 	return trMessages
 }
 
+// AndMoreFiles returns the localized "... and N more files" line.
+func AndMoreFiles(n int, lang Lang) string {
+	return Get(lang).DoneMoreFiles(n)
+}
+
+// HiddenFilesWarn returns a single-line warning about hidden dot-files/folders.
+func HiddenFilesWarn(names string, lang Lang) string {
+	if lang == EN {
+		return fmt.Sprintf("warning: includes hidden files/folders (%s)", names)
+	}
+	return fmt.Sprintf("uyarı: gizli dosya/klasör içeriyor (%s)", names)
+}
+
+// RelayLimitWarn returns a single-line warning when a relayed transfer exceeds the relay cap.
+func RelayLimitWarn(limit string, lang Lang) string {
+	if lang == EN {
+		return fmt.Sprintf("warning: transfer exceeds relay fallback limit (%s)", limit)
+	}
+	return fmt.Sprintf("uyarı: dosya boyutu yedek yol sınırını (%s) aşıyor", limit)
+}
+
 // Explain turns an error into a localized headline and actionable hints.
 func Explain(err error, lang Lang) (string, []string) {
 	if err == nil {

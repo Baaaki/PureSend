@@ -15,6 +15,7 @@ import (
 	"puresend/internal/transfer"
 
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 )
 
 // drain consumes a node's events, approving any manifest, and returns the
@@ -274,7 +275,7 @@ func TestWrongCodeGetsNothing(t *testing.T) {
 	if err := impostor.Connect(ctx, *info); err != nil {
 		t.Fatal(err)
 	}
-	s, err := impostor.NewStream(ctx, info.ID, transfer.ProtocolID)
+	s, err := impostor.NewStream(network.WithAllowLimitedConn(ctx, "test"), info.ID, transfer.ProtocolID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +349,7 @@ func TestTooManyWrongCodesCloseTheRoom(t *testing.T) {
 		t.Fatal(err)
 	}
 	guess := func(words string) error {
-		s, err := guesser.NewStream(ctx, info.ID, transfer.ProtocolID)
+		s, err := guesser.NewStream(network.WithAllowLimitedConn(ctx, "test"), info.ID, transfer.ProtocolID)
 		if err != nil {
 			return err
 		}

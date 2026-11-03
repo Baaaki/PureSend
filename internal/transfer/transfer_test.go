@@ -748,3 +748,92 @@ func BenchmarkValidDigest(b *testing.B) {
 		_ = validDigest(digest)
 	}
 }
+
+func TestCollectDeduplicatesCollidingTopLevelNames(t *testing.T) {
+	root := t.TempDir()
+	f1 := writeTempFile(t, root, "dir1/rapor.pdf", []byte("one"))
+	f2 := writeTempFile(t, root, "dir2/rapor.pdf", []byte("two"))
+	_ = writeTempFile(t, root, "dir1/docs/a.txt", []byte("a"))
+	_ = writeTempFile(t, root, "dir2/docs/b.txt", []byte("b"))
+
+	entries, err := Collect([]string{
+		f1,
+		f2,
+		filepath.Join(root, "dir1/docs"),
+		filepath.Join(root, "dir2/docs"),
+	})
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	want := []string{
+		"rapor.pdf",
+		"rapor (1).pdf",
+		"docs/a.txt",
+		"docs (1)/b.txt",
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(entries), len(want))
+	}
+	for i, w := range want {
+		if entries[i].Rel != w {
+			t.Errorf("entries[%d].Rel = %q, want %q", i, entries[i].Rel, w)
+		}
+	}
+}
+
+func TestResumeAfterPlaceRenamedFileDoesNotRedownload(t *testing.T) {
+	srcDir := t.TempDir()
+	outDir := filepath.Join(t.TempDir(), "downloads")
+
+	// Pre-populate outDir with an older "rapor.pdf" so place() renames the incoming one to "rapor (1).pdf".
+	writeTempFile(t, outDir, "rapor.pdf", []byte("existing old version"))
+
+	firstPayload := []byte("new report payload")
+	secondPayload := make([]byte, 512<<10)
+	for i := range secondPayload {
+		secondPayload[i] = byte(i*31%251 + 1)
+	}
+	f1 := writeTempFile(t, srcDir, "rapor.pdf", firstPayload)
+	f2 := writeTempFile(t, srcDir, "second.bin", secondPayload)
+	paths := []string{f1, f2}
+
+	// Attempt 1: completes "rapor.pdf" (placed as "rapor (1).pdf") and drops mid-way through "second.bin".
+	s1, r1 := net.Pipe()
+	go func() { _ = SendPaths(&cutAfter{Conn: s1, left: 100 << 10}, paths, testCreds(), Hooks{}) }()
+	if _, err := Receive(r1, outDir, testCreds(), nil, Hooks{}); err == nil {
+		t.Fatal("first attempt succeeded despite cutoff")
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "rapor (1).pdf")); err != nil {
+		t.Fatalf("expected rapor (1).pdf after first attempt: %v", err)
+	}
+
+	// Attempt 2: resumes and finishes without re-downloading rapor.pdf or creating rapor (2).pdf.
+	s2, r2 := net.Pipe()
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- SendPaths(s2, paths, testCreds(), Hooks{}) }()
+
+	var firstFileIncomplete int
+	saved, err := Receive(r2, outDir, testCreds(), nil, Hooks{
+		Progress: func(p Progress) {
+			if p.Index == 1 && p.Done < p.Total {
+				firstFileIncomplete++
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("second attempt Receive: %v", err)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("second attempt SendPaths: %v", err)
+	}
+	if firstFileIncomplete > 0 {
+		t.Errorf("first file was re-downloaded on resume (%d incomplete progress events)", firstFileIncomplete)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "rapor (2).pdf")); !os.IsNotExist(err) {
+		t.Errorf("resume created duplicate rapor (2).pdf")
+	}
+	if len(saved) != 2 || filepath.Base(saved[0]) != "rapor (1).pdf" {
+		t.Errorf("saved = %v, want first entry to be rapor (1).pdf", saved)
+	}
+}

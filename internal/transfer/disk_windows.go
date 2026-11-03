@@ -12,7 +12,7 @@ func CheckAvailableSpace(dir string, required int64) error {
 	if required <= 0 {
 		return nil
 	}
-	dirPtr, err := windows.UTF16PtrFromString(dir)
+	dirPtr, err := windows.UTF16PtrFromString(existingDir(dir))
 	if err != nil {
 		return nil //nolint:nilerr // optional check; proceed if conversion fails
 	}
@@ -20,8 +20,9 @@ func CheckAvailableSpace(dir string, required int64) error {
 	if windows.GetDiskFreeSpaceEx(dirPtr, &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes) != nil {
 		return nil
 	}
-	if int64(freeBytesAvailable) < required {
-		return fmt.Errorf("%w: %s needed, %s available", ErrInsufficientDiskSpace, formatBytes(required), formatBytes(int64(freeBytesAvailable)))
+	free := freeSpace(freeBytesAvailable, 1)
+	if free < required {
+		return fmt.Errorf("%w: %s needed, %s available", ErrInsufficientDiskSpace, formatBytes(required), formatBytes(free))
 	}
 	return nil
 }

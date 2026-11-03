@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"puresend/internal/i18n"
 	"puresend/internal/p2p"
@@ -54,6 +55,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case nodeReadyMsg:
+		if m.screen == screenWelcome {
+			if msg.node != nil {
+				_ = msg.node.Close()
+			}
+			return m, nil
+		}
+		if m.node != nil {
+			_ = m.node.Close()
+		}
 		m.node = msg.node
 		next, cmd := m.beginMode()
 		// The one place the event reader is armed; handleEvent keeps it
@@ -90,6 +100,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleEvent folds a p2p event into the model.
 func (m Model) handleEvent(ev p2p.Event) (tea.Model, tea.Cmd) {
+	if m.node == nil {
+		return m, nil
+	}
 	switch e := ev.(type) {
 
 	case p2p.StatusEvent:
@@ -256,8 +269,7 @@ func (m Model) welcomeKey(key string) (tea.Model, tea.Cmd) {
 func (m Model) pickFilesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.screen = screenWelcome
-		m.picked = nil
+		return m.reset(), nil
 	case "s", "S":
 		if len(m.picked) > 0 {
 			m.screen = screenConnecting
@@ -314,10 +326,8 @@ func (m Model) outDirKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) enterCodeKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
-		m.screen = screenWelcome
 		m.codeInput.Reset()
-		m.codeErr = ""
-		return m, nil
+		return m.reset(), nil
 	case "enter":
 		if strings.TrimSpace(m.codeInput.Value()) == "" {
 			return m, nil
@@ -412,7 +422,31 @@ func (m Model) answerConfirm(ok bool) (tea.Model, tea.Cmd) {
 		// Declining ends the session. Tear it down rather than just
 		// walking back to the menu: the refused transfer is about to
 		// report itself as failed, and the user who pressed "no" should
-		// not then be shown an error about it.
+		// not then be shown an error about it. Let the refusal frame
+		// flush before closing the node.
+		if node := m.node; node != nil {
+			m.node = nil
+			ctx := m.ctx
+			go func() {
+				defer func() { _ = node.Close() }()
+				timer := time.NewTimer(time.Second)
+				defer timer.Stop()
+				for {
+					select {
+					case ev := <-node.Events():
+						if _, done := ev.(p2p.DoneEvent); done {
+							return
+						}
+					case <-node.Done():
+						return
+					case <-ctx.Done():
+						return
+					case <-timer.C:
+						return
+					}
+				}
+			}()
+		}
 		return m.reset(), nil
 	}
 	m.screen = screenTransfer
@@ -433,6 +467,9 @@ func (m *Model) addPath(path string) {
 	}
 	pick := pickedFile{path: path, name: info.Name(), size: info.Size()}
 	if info.IsDir() {
+		if err := transfer.CheckDestination(path); err != nil {
+			return
+		}
 		size, count := folderSize(path)
 		if count == 0 {
 			return // an empty folder would carry nothing across
@@ -444,12 +481,22 @@ func (m *Model) addPath(path string) {
 	m.picked = append(m.picked, pick)
 }
 
+const (
+	maxFolderWalkEntries  = 10_000
+	maxFolderWalkDuration = 500 * time.Millisecond
+)
+
 // folderSize adds up what sending a folder would actually move. Symbolic
 // links are skipped here for the same reason the transfer skips them.
 func folderSize(root string) (int64, int) {
 	var total int64
-	var count int
+	var count, seen int
+	deadline := time.Now().Add(maxFolderWalkDuration)
 	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
+		seen++
+		if seen > maxFolderWalkEntries || time.Now().After(deadline) {
+			return fs.SkipAll
+		}
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return nil //nolint:nilerr // an unreadable corner should not stop the count
 		}

@@ -98,9 +98,12 @@ const ownerGrace = 1 * time.Minute
 // Someone typing the code they were given gets their first lookup
 // answered, however much else is going on.
 const (
-	lookupWindow    = 1 * time.Minute
-	maxLookups      = 5
-	maxGlobalMisses = 200
+	lookupWindow        = 1 * time.Minute
+	maxLookups          = 5
+	maxGlobalMisses     = 200
+	maxGlobalMissesHard = 1000
+	maxLookupPeers      = 10_000
+	sweepInterval       = 1 * time.Second
 )
 
 // Bounds on a single protocol message, so a malicious client cannot
@@ -308,8 +311,10 @@ type Registry struct {
 
 	mu         sync.Mutex
 	rooms      map[string]roomEntry
+	retired    map[string]roomEntry
 	lookups    map[peer.ID]window
 	globalMiss window
+	lastSweep  time.Time
 	stats      Stats
 }
 
@@ -348,6 +353,7 @@ func NewRegistry(opts ...Option) *Registry {
 		maxPerPeer: DefaultMaxRoomsPerPeer,
 		maxRooms:   MaxRooms,
 		rooms:      make(map[string]roomEntry),
+		retired:    make(map[string]roomEntry),
 		lookups:    make(map[peer.ID]window),
 	}
 	for _, opt := range opts {
@@ -390,7 +396,10 @@ func (r *Registry) Handler(s network.Stream) {
 func (r *Registry) handle(from peer.ID, req Request) Response {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.dropExpired()
+	if now := time.Now(); now.Sub(r.lastSweep) >= sweepInterval {
+		r.dropExpired()
+		r.lastSweep = now
+	}
 
 	switch req.Type {
 	case "register":
@@ -437,7 +446,8 @@ func (r *Registry) register(from peer.ID, req Request) Response {
 	// anyone could take a room over and have the receiver dial them — which
 	// the handshake would catch, but only after the real sender had lost
 	// the room.
-	if existing, taken := r.rooms[req.Nameplate]; taken {
+	now := time.Now()
+	if existing, taken := r.checkRoom(req.Nameplate, now); taken {
 		if existing.info.ID != from {
 			return reject(msgInUse)
 		}
@@ -450,18 +460,32 @@ func (r *Registry) register(from peer.ID, req Request) Response {
 	if r.roomsOf(from) >= r.maxPerPeer {
 		return reject("too many open rooms for one sender")
 	}
-	if r.maxRooms > 0 && len(r.rooms) >= r.maxRooms && !r.evictAbandoned() {
-		return reject("server is full, try again later")
+	if r.maxRooms > 0 && len(r.rooms) >= r.maxRooms {
+		r.dropExpired()
+		r.lastSweep = now
+		if len(r.rooms) >= r.maxRooms && !r.evictAbandoned() {
+			return reject("server is full, try again later")
+		}
 	}
 
 	// A named register for a room the server does not hold is a sender
 	// taking its nameplate back after the server forgot it (a restart), so
-	// the code its user has already read out keeps working.
+	// the code its user has already read out keeps working. If the server
+	// remembers this sender retiring the room earlier, keep its original
+	// clock so Unregister+Register cannot extend RoomTTL.
 	nameplate := req.Nameplate
+	createdAt := now
 	if nameplate == "" {
 		nameplate = r.freeNameplate()
+	} else if prev, ok := r.retired[nameplate]; ok {
+		if now.Sub(prev.createdAt) > RoomTTL {
+			delete(r.retired, nameplate)
+		} else if prev.info.ID == from {
+			createdAt = prev.createdAt
+			delete(r.retired, nameplate)
+		}
 	}
-	r.rooms[nameplate] = roomEntry{info: info, createdAt: time.Now()}
+	r.rooms[nameplate] = roomEntry{info: info, createdAt: createdAt}
 	r.stats.Registered++
 	return Response{Type: "ok", Nameplate: nameplate}
 }
@@ -534,11 +558,27 @@ func (r *Registry) evictAbandoned() bool {
 // only honest answer to "make sure this room of mine is gone" when it
 // already is, is yes.
 func (r *Registry) unregister(from peer.ID, req Request) Response {
-	if entry, ok := r.rooms[req.Nameplate]; ok && entry.info.ID == from {
+	now := time.Now()
+	if entry, ok := r.checkRoom(req.Nameplate, now); ok && entry.info.ID == from {
 		delete(r.rooms, req.Nameplate)
+		r.retireRoom(req.Nameplate, entry, now)
 		r.stats.Unregistered++
 	}
 	return Response{Type: "ok"}
+}
+
+func (r *Registry) retireRoom(room string, entry roomEntry, now time.Time) {
+	if _, exists := r.retired[room]; !exists && len(r.retired) >= maxLookupPeers {
+		r.dropExpired()
+		r.lastSweep = now
+		if len(r.retired) >= maxLookupPeers {
+			for k := range r.retired {
+				delete(r.retired, k)
+				break
+			}
+		}
+	}
+	r.retired[room] = entry
 }
 
 // lookup is called with the lock held. See the comment on the limits above.
@@ -551,18 +591,27 @@ func (r *Registry) lookup(from peer.ID, req Request) Response {
 	}
 
 	now := time.Now()
+	if _, known := r.lookups[from]; !known && len(r.lookups) >= maxLookupPeers {
+		r.dropExpired()
+		r.lastSweep = now
+		if len(r.lookups) >= maxLookupPeers {
+			r.stats.LookupsThrottled++
+			return Response{Type: "error", Error: "too many lookups, try again in a minute"}
+		}
+	}
 	lc := r.lookups[from].current(now, lookupWindow)
 	r.globalMiss = r.globalMiss.current(now, lookupWindow)
 	underPressure := r.globalMiss.count >= maxGlobalMisses
+	hardCap := r.globalMiss.count >= maxGlobalMissesHard
 
-	if lc.count >= maxLookups || (underPressure && lc.count > 0) {
+	if lc.count >= maxLookups || (underPressure && lc.count > 0) || hardCap {
 		r.stats.LookupsThrottled++
 		return Response{Type: "error", Error: "too many lookups, try again in a minute"}
 	}
 	lc.count++
 	r.lookups[from] = lc
 
-	entry, ok := r.rooms[req.Nameplate]
+	entry, ok := r.checkRoom(req.Nameplate, now)
 	if !ok {
 		r.globalMiss.count++
 		r.stats.LookupsNotFound++
@@ -614,13 +663,37 @@ func (r *Registry) ownerBack(p peer.ID) {
 
 // roomsOf counts a peer's rooms. Called with the lock held.
 func (r *Registry) roomsOf(p peer.ID) int {
+	now := time.Now()
 	n := 0
-	for _, e := range r.rooms {
-		if e.info.ID == p {
+	for room := range r.rooms {
+		if e, ok := r.checkRoom(room, now); ok && e.info.ID == p {
 			n++
 		}
 	}
 	return n
+}
+
+func (r *Registry) checkRoom(room string, now time.Time) (roomEntry, bool) {
+	if room == "" {
+		return roomEntry{}, false
+	}
+	e, ok := r.rooms[room]
+	if !ok {
+		return roomEntry{}, false
+	}
+	switch {
+	case now.Sub(e.createdAt) > RoomTTL:
+		delete(r.rooms, room)
+		delete(r.retired, room)
+		r.stats.Expired++
+		return roomEntry{}, false
+	case !e.ownerGone.IsZero() && now.Sub(e.ownerGone) > ownerGrace:
+		delete(r.rooms, room)
+		r.retired[room] = e
+		r.stats.Abandoned++
+		return roomEntry{}, false
+	}
+	return e, true
 }
 
 // ActiveRooms reports how many rooms are currently registered.
@@ -645,7 +718,10 @@ func (r *Registry) Stats() Stats {
 func (r *Registry) HasPeer(p peer.ID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.dropExpired()
+	if now := time.Now(); now.Sub(r.lastSweep) >= sweepInterval {
+		r.dropExpired()
+		r.lastSweep = now
+	}
 	return r.roomsOf(p) > 0
 }
 
@@ -674,10 +750,17 @@ func (r *Registry) dropExpired() {
 		switch {
 		case now.Sub(e.createdAt) > RoomTTL:
 			delete(r.rooms, room)
+			delete(r.retired, room)
 			r.stats.Expired++
 		case !e.ownerGone.IsZero() && now.Sub(e.ownerGone) > ownerGrace:
 			delete(r.rooms, room)
+			r.retired[room] = e
 			r.stats.Abandoned++
+		}
+	}
+	for room, e := range r.retired {
+		if now.Sub(e.createdAt) > RoomTTL {
+			delete(r.retired, room)
 		}
 	}
 	for p, lc := range r.lookups {

@@ -34,6 +34,7 @@ type Entry struct {
 func Collect(paths []string) ([]Entry, error) {
 	var entries []Entry
 	seen := make(map[string]bool)
+	usedTop := make(map[string]bool)
 
 	for _, p := range paths {
 		clean := filepath.Clean(p)
@@ -50,11 +51,15 @@ func Collect(paths []string) ([]Entry, error) {
 			if !info.Mode().IsRegular() {
 				return nil, fmt.Errorf("%s is not an ordinary file", filepath.Base(clean))
 			}
-			entries = append(entries, Entry{Local: clean, Rel: filepath.Base(clean)})
+			rel := uniqueTopName(filepath.Base(clean), usedTop)
+			usedTop[rel] = true
+			entries = append(entries, Entry{Local: clean, Rel: rel})
 			continue
 		}
 
-		root := filepath.Base(clean)
+		base := filepath.Base(clean)
+		root := uniqueTopName(base, usedTop)
+		before := len(entries)
 		err = filepath.WalkDir(clean, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -73,7 +78,10 @@ func Collect(paths []string) ([]Entry, error) {
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("could not read the folder %s: %w", root, err)
+			return nil, fmt.Errorf("could not read the folder %s: %w", base, err)
+		}
+		if len(entries) > before {
+			usedTop[root] = true
 		}
 	}
 
@@ -84,6 +92,14 @@ func Collect(paths []string) ([]Entry, error) {
 		return nil, fmt.Errorf("too many files: %d, at most %d can be sent at once", len(entries), maxFiles)
 	}
 	return entries, nil
+}
+
+func uniqueTopName(base string, used map[string]bool) string {
+	name := base
+	for i := 1; used[name]; i++ {
+		name = numbered(base, i)
+	}
+	return name
 }
 
 // SourceError wraps a failure to read the sender's own files. Unlike a

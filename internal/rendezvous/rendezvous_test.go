@@ -529,3 +529,52 @@ func TestGlobalLimitTakesAwaySecondChances(t *testing.T) {
 		t.Fatalf("the server-wide limit did not expire: %+v", resp)
 	}
 }
+
+func TestUnregisterAndReRegisterPreservesCreatedAt(t *testing.T) {
+	r := NewRegistry()
+	np := open(t, r, sender)
+
+	original := time.Now().Add(-45 * time.Minute)
+	e := r.rooms[np]
+	e.createdAt = original
+	r.rooms[np] = e
+
+	if resp := r.handle(sender, Request{Type: "unregister", Nameplate: np}); resp.Type != "ok" {
+		t.Fatalf("unregister failed: %+v", resp)
+	}
+	if resp := register(r, sender, np); resp.Type != "ok" {
+		t.Fatalf("re-register failed: %+v", resp)
+	}
+	if got := r.rooms[np].createdAt; !got.Equal(original) {
+		t.Errorf("createdAt after Unregister+Register = %v, want original %v", got, original)
+	}
+}
+
+func TestLookupsMapCapAndHardMissLimit(t *testing.T) {
+	r := NewRegistry()
+	np := open(t, r, sender)
+
+	// Hard global miss cap stops fresh-identity walking floods completely.
+	for i := range maxGlobalMissesHard {
+		id := peer.ID(fmt.Sprintf("bot-%d", i))
+		if resp := lookup(r, id, unused(r)); resp.Type != "not_found" {
+			t.Fatalf("miss %d got %+v, want not_found", i, resp)
+		}
+	}
+	if resp := lookup(r, peer.ID("bot-over-hard-cap"), np); resp.Type != "error" {
+		t.Fatalf("lookup past hard global miss cap got %+v, want error", resp)
+	}
+
+	// Reset globalMiss and verify maxLookupPeers cap bounds the map.
+	r2 := NewRegistry()
+	now := time.Now()
+	for i := range maxLookupPeers {
+		r2.lookups[peer.ID(fmt.Sprintf("peer-%d", i))] = window{count: 1, start: now}
+	}
+	if resp := lookup(r2, peer.ID("overflow-peer"), "42"); resp.Type != "error" {
+		t.Fatalf("lookup when lookups map is full got %+v, want error", resp)
+	}
+	if len(r2.lookups) > maxLookupPeers {
+		t.Errorf("len(lookups) = %d, exceeds maxLookupPeers (%d)", len(r2.lookups), maxLookupPeers)
+	}
+}

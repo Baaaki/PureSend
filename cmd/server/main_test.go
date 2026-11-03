@@ -28,7 +28,7 @@ func TestTunnelClientsAreNotOneClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rm, err := resourceManager(trusted)
+	rm, err := resourceManager(trusted, rendezvous.MaxRooms)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,18 +67,38 @@ func TestTunnelClientsAreNotOneClient(t *testing.T) {
 // and 128 in all. Every room owner needs one, and behind a tunnel they all
 // share one address.
 func TestRelayHoldsASlotPerRoom(t *testing.T) {
-	rc := relayResources(256<<20, 10*time.Minute)
+	rc := relayResources(256<<20, 10*time.Minute, 2500)
 	for name, got := range map[string]int{
 		"MaxReservations":       rc.MaxReservations,
 		"MaxReservationsPerIP":  rc.MaxReservationsPerIP,
 		"MaxReservationsPerASN": rc.MaxReservationsPerASN,
 	} {
-		if got < rendezvous.MaxRooms {
-			t.Errorf("%s = %d, fewer than the %d rooms the server may hold", name, got, rendezvous.MaxRooms)
+		if got != 2500 {
+			t.Errorf("%s = %d, want 2500", name, got)
 		}
 	}
 	if rc.Limit == nil || rc.Limit.Data != 256<<20 || rc.Limit.Duration != 10*time.Minute {
 		t.Errorf("relay limit = %+v, want the configured one", rc.Limit)
+	}
+}
+
+func TestListenAddrsIncludesIPv4AndIPv6(t *testing.T) {
+	got := listenAddrs(9090, 4001)
+	want := []string{
+		"/ip4/0.0.0.0/tcp/9090/ws",
+		"/ip6/::/tcp/9090/ws",
+		"/ip4/0.0.0.0/tcp/4001",
+		"/ip6/::/tcp/4001",
+		"/ip4/0.0.0.0/udp/4001/quic-v1",
+		"/ip6/::/udp/4001/quic-v1",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("listenAddrs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("listenAddrs[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

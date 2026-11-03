@@ -258,3 +258,42 @@ func TestExtractBinary(t *testing.T) {
 		t.Errorf("expected %s, got %s", content, outZip.Bytes())
 	}
 }
+
+func TestFindAssetExcludesServerSignaturesAndPackages(t *testing.T) {
+	assets := []Asset{
+		{Name: "puresend-server_0.3.0_linux_amd64.tar.gz"},
+		{Name: "puresend_0.3.0_linux_amd64.tar.gz.minisig"},
+		{Name: "puresend_0.3.0_linux_amd64.tar.gz.sig"},
+		{Name: "puresend_0.3.0_linux_amd64.tar.gz.asc"},
+		{Name: "puresend_0.3.0_linux_amd64.rpm"},
+		{Name: "puresend_0.3.0_linux_amd64.apk"},
+		{Name: "puresend_0.3.0_linux_amd64.sbom.json"},
+		{Name: "puresend_0.3.0_linux_amd64.txt"},
+		{Name: "puresend_0.3.0_darwin_arm64.dmg"},
+		{Name: "puresend_0.3.0_darwin_arm64.pkg"},
+		{Name: "puresend_0.3.0_windows_amd64.msi"},
+		{Name: "puresend_0.3.0_linux_amd64.tar.gz"},
+	}
+
+	got := FindAsset(assets, "linux", "amd64")
+	if got == nil || got.Name != "puresend_0.3.0_linux_amd64.tar.gz" {
+		t.Fatalf("FindAsset(linux/amd64) = %+v, want puresend_0.3.0_linux_amd64.tar.gz", got)
+	}
+	if got := FindAsset(assets[:len(assets)-1], "linux", "amd64"); got != nil {
+		t.Errorf("FindAsset matched excluded asset: %+v", got)
+	}
+	if got := FindAsset(assets, "darwin", "arm64"); got != nil {
+		t.Errorf("FindAsset matched installer package on darwin: %+v", got)
+	}
+	if got := FindAsset(assets, "windows", "amd64"); got != nil {
+		t.Errorf("FindAsset matched msi installer on windows: %+v", got)
+	}
+}
+
+func TestCopyBoundedRejectsOversizedStream(t *testing.T) {
+	var dst bytes.Buffer
+	src := bytes.NewReader(bytes.Repeat([]byte("a"), 1025))
+	if err := copyBounded(&dst, src, 1024); err == nil {
+		t.Fatal("expected copyBounded to fail when stream exceeds limit")
+	}
+}

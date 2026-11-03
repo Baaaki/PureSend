@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -25,6 +26,7 @@ import (
 
 	"puresend/internal/i18n"
 	"puresend/internal/p2p"
+	"puresend/internal/safetext"
 	"puresend/internal/transfer"
 )
 
@@ -103,19 +105,55 @@ func Receive(servers []string, room, outDir string, autoAccept bool, lang string
 
 	go node.Fetch(ctx, room, outDir)
 	return pump(ctx, node, func(m transfer.Manifest) bool {
-		if l == i18n.TR {
-			logf("gelen: %d dosya, %s", len(m.Files), formatBytes(m.TotalSize()))
-		} else {
-			logf("incoming: %d file(s), %s", len(m.Files), formatBytes(m.TotalSize()))
-		}
-		for _, f := range m.Files {
-			logf("  %s (%s)", f.Path, formatBytes(f.Size))
+		for _, line := range formatManifest(m, l) {
+			logf("%s", line)
 		}
 		if autoAccept {
 			return true
 		}
-		return askYesNo(l)
+		return askYesNo(ctx, l)
 	}, false, l)
+}
+
+const maxListedFiles = 20
+
+func formatManifest(m transfer.Manifest, l i18n.Lang) []string {
+	var lines []string
+	if l == i18n.TR {
+		lines = append(lines, fmt.Sprintf("gelen: %d dosya, %s", len(m.Files), formatBytes(m.TotalSize())))
+	} else {
+		lines = append(lines, fmt.Sprintf("incoming: %d file(s), %s", len(m.Files), formatBytes(m.TotalSize())))
+	}
+	for i, f := range m.Files {
+		if i == maxListedFiles {
+			lines = append(lines, i18n.AndMoreFiles(len(m.Files)-maxListedFiles, l))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("  %s (%s)", safetext.Clean(f.Path, 200), formatBytes(f.Size)))
+	}
+	if hidden := hiddenEntries(m.Files); len(hidden) > 0 {
+		lines = append(lines, i18n.HiddenFilesWarn(strings.Join(hidden, ", "), l))
+	}
+	return lines
+}
+
+func hiddenEntries(files []transfer.FileInfo) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, f := range files {
+		clean := path.Clean(f.Path)
+		for _, part := range strings.Split(clean, "/") {
+			if strings.HasPrefix(part, ".") && part != "." && part != ".." {
+				name := safetext.Clean(part, 80)
+				if !seen[name] {
+					seen[name] = true
+					out = append(out, name)
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 // pump consumes the node's events until the transfer ends, reporting
@@ -124,6 +162,8 @@ func Receive(servers []string, room, outDir string, autoAccept bool, lang string
 // keeps going after a failed attempt, since its room is still open.
 func pump(ctx context.Context, node *p2p.Node, confirm func(transfer.Manifest) bool, host bool, l i18n.Lang) error {
 	var lastPrinted, lastPrep time.Time
+	var direct bool
+	var relayLimit int64
 
 	for {
 		select {
@@ -153,6 +193,12 @@ func pump(ctx context.Context, node *p2p.Node, confirm func(transfer.Manifest) b
 				}
 
 			case p2p.ConnectedEvent:
+				direct = e.Direct
+				if e.Direct {
+					relayLimit = 0
+				} else {
+					relayLimit = e.RelayLimit
+				}
 				logf("%s", describeConnection(e, l))
 
 			case p2p.PreparingEvent:
@@ -209,11 +255,11 @@ func pump(ctx context.Context, node *p2p.Node, confirm func(transfer.Manifest) b
 				return e.Err
 
 			case p2p.ManifestEvent:
+				if !direct && relayLimit > 0 && e.Manifest.TotalSize() > relayLimit {
+					logf("%s", i18n.RelayLimitWarn(formatBytes(relayLimit), l))
+				}
 				ok := confirm != nil && confirm(e.Manifest)
 				e.Reply <- ok
-				if !ok {
-					return transfer.ErrTransferDeclined
-				}
 
 			case p2p.ProgressEvent:
 				// One line per second is plenty for a log file.
@@ -291,21 +337,31 @@ func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
-func askYesNo(l i18n.Lang) bool {
+func askYesNo(ctx context.Context, l i18n.Lang) bool {
 	if l == i18n.TR {
 		fmt.Fprint(os.Stderr, "kabul ediyor musun? [e/H] ")
 	} else {
 		fmt.Fprint(os.Stderr, "accept? [y/N] ")
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
+	res := make(chan string, 1)
+	go func() {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil {
+			res <- ""
+			return
+		}
+		res <- line
+	}()
+	select {
+	case <-ctx.Done():
+		return false
+	case line := <-res:
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "y", "yes", "e", "evet":
+			return true
+		}
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes", "e", "evet":
-		return true
-	}
-	return false
 }
 
 func logf(format string, args ...any) {

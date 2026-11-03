@@ -22,19 +22,16 @@ SERVER_LIST="https://puresend.madebybaki.com/server.txt"
 # `puresend -update` checks checksums but not their signature.
 UPDATE_KEY="${FT_UPDATE_KEY:-RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts}"
 
-# If binary already exists and no rebuild requested, we can use it or rebuild:
-if [ ! -f "${OUTPUT_DIR}/puresend" ]; then
-  echo "==> Linux binary derleniyor (${ARCH})..."
-  cd "${ROOT_DIR}"
-  CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build -trimpath -ldflags "-s -w \
-    -X main.defaultServer=${SERVER_ADDR} \
-    -X main.defaultServerList=${SERVER_LIST} \
-    -X puresend/internal/update.publicKey=${UPDATE_KEY} \
-    -X main.version=v${VERSION} \
-    -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown') \
-    -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    -o "${OUTPUT_DIR}/puresend" ./cmd/client
-fi
+echo "==> Linux binary derleniyor (${ARCH})..."
+cd "${ROOT_DIR}"
+CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build -trimpath -ldflags "-s -w \
+  -X main.defaultServer=${SERVER_ADDR} \
+  -X main.defaultServerList=${SERVER_LIST} \
+  -X puresend/internal/update.publicKey=${UPDATE_KEY} \
+  -X main.version=v${VERSION} \
+  -X main.commit=$(git rev-parse --short HEAD 2>/dev/null || echo 'unknown') \
+  -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  -o "${OUTPUT_DIR}/puresend" ./cmd/client
 
 echo "==> .deb paket yapısı hazırlanıyor..."
 BUILD_DIR="${ROOT_DIR}/.deb_staging_${ARCH}"

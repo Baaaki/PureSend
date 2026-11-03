@@ -289,6 +289,9 @@ func fetchCmd(ctx context.Context, node *p2p.Node, room, outDir string) tea.Cmd 
 // "done" overtake a straggling progress event and leave the user staring
 // at a transfer screen that never finishes.
 func waitEvent(node *p2p.Node) tea.Cmd {
+	if node == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		select {
 		case ev := <-node.Events():

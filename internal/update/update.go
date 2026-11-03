@@ -203,13 +203,38 @@ func FindAsset(assets []Asset, targetOS, targetArch string) *Asset {
 
 	for i := range assets {
 		name := strings.ToLower(assets[i].Name)
-		// Avoid source tarballs, checksum files, and deb packages
-		if strings.HasSuffix(name, ".sha256") || strings.HasSuffix(name, ".md5") || strings.Contains(name, "source") || strings.HasSuffix(name, ".deb") {
+		if isExcludedAsset(name) {
 			continue
 		}
 		if matchOS(name) && matchArch(name) {
 			return &assets[i]
 		}
+	}
+	return nil
+}
+
+func isExcludedAsset(name string) bool {
+	if strings.Contains(name, "source") || strings.Contains(name, "server") || strings.Contains(name, ".sbom") {
+		return true
+	}
+	for _, ext := range []string{
+		".sha256", ".md5", ".minisig", ".sig", ".asc",
+		".deb", ".rpm", ".apk", ".dmg", ".pkg", ".msi", ".txt", ".sbom",
+	} {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func copyBounded(dst io.Writer, src io.Reader, limit int64) error {
+	n, err := io.Copy(dst, io.LimitReader(src, limit+1))
+	if err != nil {
+		return err
+	}
+	if n > limit {
+		return fmt.Errorf("extracted binary exceeds maximum size (%d bytes)", limit)
 	}
 	return nil
 }
@@ -236,8 +261,7 @@ func extractBinary(assetName string, r io.Reader, dst io.Writer) error {
 			if hdr.Typeflag == tar.TypeReg {
 				base := filepath.Base(hdr.Name)
 				if base == "puresend" || base == "puresend.exe" {
-					_, err := io.Copy(dst, tr)
-					return err
+					return copyBounded(dst, tr, maxArchiveBytes)
 				}
 			}
 		}
@@ -245,9 +269,12 @@ func extractBinary(assetName string, r io.Reader, dst io.Writer) error {
 	}
 
 	if strings.HasSuffix(lower, ".zip") {
-		buf, err := io.ReadAll(r)
+		buf, err := io.ReadAll(io.LimitReader(r, maxArchiveBytes+1))
 		if err != nil {
 			return fmt.Errorf("could not read the zip archive: %w", err)
+		}
+		if int64(len(buf)) > maxArchiveBytes {
+			return fmt.Errorf("zip archive exceeds maximum size (%d bytes)", maxArchiveBytes)
 		}
 		zr, err := zip.NewReader(bytes.NewReader(buf), int64(len(buf)))
 		if err != nil {
@@ -261,16 +288,14 @@ func extractBinary(assetName string, r io.Reader, dst io.Writer) error {
 					return err
 				}
 				defer rc.Close()
-				_, err = io.Copy(dst, rc)
-				return err
+				return copyBounded(dst, rc, maxArchiveBytes)
 			}
 		}
 		return errors.New("the zip archive holds no puresend executable")
 	}
 
 	// Plain binary
-	_, err := io.Copy(dst, r)
-	return err
+	return copyBounded(dst, r, maxArchiveBytes)
 }
 
 // Apply checks for updates and replaces the running executable if a newer

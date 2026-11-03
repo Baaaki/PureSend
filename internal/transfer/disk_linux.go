@@ -13,10 +13,10 @@ func CheckAvailableSpace(dir string, required int64) error {
 		return nil //nolint:nilerr // non-fatal fallback if statfs unsupported
 	}
 	var stat unix.Statfs_t
-	if unix.Statfs(dir, &stat) != nil {
+	if unix.Statfs(existingDir(dir), &stat) != nil || stat.Bsize <= 0 {
 		return nil //nolint:nilerr // non-fatal fallback if statfs unsupported
 	}
-	free := int64(stat.Bavail) * stat.Bsize
+	free := freeSpace(stat.Bavail, uint64(stat.Bsize))
 	if free < required {
 		return fmt.Errorf("%w: %s needed, %s available", ErrInsufficientDiskSpace, formatBytes(required), formatBytes(free))
 	}

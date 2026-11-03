@@ -234,6 +234,9 @@ func TestPickFilesEscReturnsToWelcome(t *testing.T) {
 	if got.screen != screenWelcome {
 		t.Errorf("screen = %v, want screenWelcome after esc", got.screen)
 	}
+	if got.mode != modeNone {
+		t.Errorf("mode = %v, want modeNone after esc", got.mode)
+	}
 	if len(got.picked) != 0 {
 		t.Errorf("picked = %v, want picked cleared on return to welcome", got.picked)
 	}
@@ -248,6 +251,9 @@ func TestEnterCodeEscReturnsToWelcome(t *testing.T) {
 	got := press(t, m, "esc")
 	if got.screen != screenWelcome {
 		t.Errorf("screen = %v, want screenWelcome after esc", got.screen)
+	}
+	if got.mode != modeNone {
+		t.Errorf("mode = %v, want modeNone after esc", got.mode)
 	}
 	if got.codeInput.Value() != "" {
 		t.Errorf("codeInput = %q, want cleared after esc", got.codeInput.Value())
@@ -425,6 +431,7 @@ func TestRelayLimitWarning(t *testing.T) {
 // the direct connection status and clear relay limits.
 func TestDynamicConnectionUpgrade(t *testing.T) {
 	m := New(Config{Servers: []string{"x"}})
+	m.node = &p2p.Node{}
 	m.screen = screenTransfer
 	m.haveConn = true
 	m.direct = false
@@ -572,6 +579,9 @@ func TestUnknownErrorsAreCleaned(t *testing.T) {
 // does.
 func event(t *testing.T, m Model, ev p2p.Event) Model {
 	t.Helper()
+	if m.node == nil {
+		m.node = &p2p.Node{}
+	}
 	next, _ := m.Update(eventMsg{ev})
 	return next.(Model)
 }
@@ -974,5 +984,47 @@ func TestVimKeysDisabled(t *testing.T) {
 		if m.dirPicker.CurrentDirectory != outDirInitial {
 			t.Errorf("key %q changed outDir directory from %s to %s", key, outDirInitial, m.dirPicker.CurrentDirectory)
 		}
+	}
+}
+
+func TestStaleEventsIgnoredAfterReset(t *testing.T) {
+	m := New(Config{Servers: []string{"x"}})
+	m = m.reset()
+	if m.node != nil {
+		t.Fatalf("expected nil node after reset")
+	}
+
+	next, cmd := m.Update(eventMsg{p2p.DoneEvent{Err: fmt.Errorf("transfer declined by receiver")}})
+	got := next.(Model)
+	if got.screen != screenWelcome {
+		t.Errorf("screen = %v, want screenWelcome (stale event after reset must be ignored)", got.screen)
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil when node is nil", cmd)
+	}
+	if waitEvent(nil) != nil {
+		t.Error("waitEvent(nil) must return nil")
+	}
+
+	next, cmd = got.Update(nodeReadyMsg{node: nil})
+	got = next.(Model)
+	if got.screen != screenWelcome || cmd != nil {
+		t.Errorf("nodeReadyMsg on welcome screen should be ignored, got screen=%v cmd=%v", got.screen, cmd)
+	}
+}
+
+func TestPickFolderRejectsUnsafeDirectories(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home dir")
+	}
+
+	m := New(Config{Servers: []string{"x"}})
+	m.screen = screenPickFiles
+	m.picker.CurrentDirectory = home
+
+	next := press(t, m, "f")
+	if len(next.picked) != 0 {
+		t.Errorf("picking $HOME with 'f' should be rejected, got %+v", next.picked)
 	}
 }

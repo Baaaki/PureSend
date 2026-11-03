@@ -133,7 +133,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("could not parse -trusted-proxies: %v", err)
 	}
-	rm, err := resourceManager(trusted)
+	rm, err := resourceManager(trusted, *maxRooms)
 	if err != nil {
 		log.Fatalf("could not set up connection limits: %v", err)
 	}
@@ -170,7 +170,7 @@ func main() {
 		// coordination), and a bounded fallback keeps a failed hole punch
 		// from streaming gigabytes through the tunnel.
 		libp2p.EnableRelayService(
-			relay.WithResources(relayResources(*relayData, *relayDuration)),
+			relay.WithResources(relayResources(*relayData, *relayDuration, *maxRooms)),
 			relay.WithACL(registry),
 		),
 	}
@@ -252,12 +252,17 @@ func listenAddrs(wsPort, rawPort int) []string {
 	if wsPort > 0 {
 		// Plain /ws, not /wss: TLS is terminated by Cloudflare (or any
 		// other reverse proxy) in front of us.
-		addrs = append(addrs, fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort))
+		addrs = append(addrs,
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort),
+			fmt.Sprintf("/ip6/::/tcp/%d/ws", wsPort),
+		)
 	}
 	if rawPort > 0 {
 		addrs = append(addrs,
 			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", rawPort),
+			fmt.Sprintf("/ip6/::/tcp/%d", rawPort),
 			fmt.Sprintf("/ip4/0.0.0.0/udp/%d/quic-v1", rawPort),
+			fmt.Sprintf("/ip6/::/udp/%d/quic-v1", rawPort),
 		)
 	}
 	return addrs
@@ -306,12 +311,15 @@ func parsePrefixes(s string) ([]netip.Prefix, error) {
 // refused to hold a slot for us" — on the first busy evening. Every room
 // owner holds exactly one reservation, so the room table already bounds
 // them; the relay's ACL admits only room owners in the first place.
-func relayResources(data int64, duration time.Duration) relay.Resources {
+func relayResources(data int64, duration time.Duration, maxRooms int) relay.Resources {
+	if maxRooms <= 0 {
+		maxRooms = rendezvous.MaxRooms
+	}
 	rc := relay.DefaultResources()
 	rc.Limit = &relay.RelayLimit{Duration: duration, Data: data}
-	rc.MaxReservations = rendezvous.MaxRooms
-	rc.MaxReservationsPerIP = rendezvous.MaxRooms
-	rc.MaxReservationsPerASN = rendezvous.MaxRooms
+	rc.MaxReservations = maxRooms
+	rc.MaxReservationsPerIP = maxRooms
+	rc.MaxReservationsPerASN = maxRooms
 	return rc
 }
 
@@ -331,11 +339,14 @@ func relayResources(data int64, duration time.Duration) relay.Resources {
 // The server-wide ceiling is raised too: every waiting sender holds one
 // connection for up to an hour, and the default of a hundred or so would
 // run out long before the room table does.
-func resourceManager(trusted []netip.Prefix) (network.ResourceManager, error) {
+func resourceManager(trusted []netip.Prefix, maxRooms int) (network.ResourceManager, error) {
+	if maxRooms <= 0 {
+		maxRooms = rendezvous.MaxRooms
+	}
 	limits := rcmgr.DefaultLimits
 	libp2p.SetDefaultServiceLimits(&limits)
-	limits.SystemBaseLimit.ConnsInbound = max(limits.SystemBaseLimit.ConnsInbound, 2*rendezvous.MaxRooms)
-	limits.SystemBaseLimit.Conns = max(limits.SystemBaseLimit.Conns, 4*rendezvous.MaxRooms)
+	limits.SystemBaseLimit.ConnsInbound = max(limits.SystemBaseLimit.ConnsInbound, 2*maxRooms)
+	limits.SystemBaseLimit.Conns = max(limits.SystemBaseLimit.Conns, 4*maxRooms)
 
 	v4 := append([]rcmgr.NetworkPrefixLimit(nil), rcmgr.DefaultNetworkPrefixLimitV4...)
 	v6 := append([]rcmgr.NetworkPrefixLimit(nil), rcmgr.DefaultNetworkPrefixLimitV6...)

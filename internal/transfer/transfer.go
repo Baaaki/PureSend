@@ -545,6 +545,8 @@ func Receive(s io.ReadWriteCloser, outDir string, creds Credentials, confirm fun
 	refuse := func(err error) error {
 		dl.write(timeouts.idle)
 		_ = enc.Encode(ack{OK: false, Error: peerMessage(err)})
+		dl.read(timeouts.linger)
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, 1))
 		return err
 	}
 
@@ -713,9 +715,8 @@ func resumeFrom(outDir string, m Manifest, targets []string, hooks Hooks) ([]par
 		copies[f.SHA256]++
 		p := partial{path: filepath.Join(dir, name), hasher: sha256.New()}
 
-		if finishedBefore(outDir, f.SHA256) && checkNoLinks(outDir, targets[i]) == nil &&
-			haveAlready(targets[i], f, func() { hooks.prepare(f.Path, i+1, len(m.Files)) }) {
-			p.complete, p.offset = targets[i], f.Size
+		if saved := finishedAt(outDir, targets[i], f, func() { hooks.prepare(f.Path, i+1, len(m.Files)) }); saved != "" {
+			p.complete, p.offset = saved, f.Size
 			os.Remove(p.path)
 			out[i] = p
 			continue
@@ -768,6 +769,33 @@ func finishedMark(outDir, digest string) string {
 func finishedBefore(outDir, digest string) bool {
 	st, err := os.Lstat(finishedMark(outDir, digest))
 	return err == nil && st.Mode().IsRegular()
+}
+
+// finishedAt returns the path where an earlier attempt placed f, if the
+// mark and the file on disk both still match.
+func finishedAt(outDir, target string, f FileInfo, announce func()) string {
+	if !finishedBefore(outDir, f.SHA256) {
+		return ""
+	}
+	if checkNoLinks(outDir, target) == nil && haveAlready(target, f, announce) {
+		return target
+	}
+	data, err := os.ReadFile(finishedMark(outDir, f.SHA256))
+	if err != nil {
+		return ""
+	}
+	rel := strings.TrimSpace(string(data))
+	if rel == "" {
+		return ""
+	}
+	saved, err := safeJoin(outDir, rel)
+	if err != nil || saved == target {
+		return ""
+	}
+	if checkNoLinks(outDir, saved) == nil && haveAlready(saved, f, announce) {
+		return saved
+	}
+	return ""
 }
 
 // forgetFinished clears the marks of a transfer that completed, and the
@@ -946,7 +974,11 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 	// Mark it finished, so that if a later file fails, the retry does not
 	// fetch this one again. Best effort: without the mark it is fetched
 	// again, which costs time, not correctness.
-	_ = os.WriteFile(finishedMark(outDir, info.SHA256), nil, 0o600)
+	var mark []byte
+	if rel, err := filepath.Rel(outDir, final); err == nil {
+		mark = []byte(filepath.ToSlash(rel))
+	}
+	_ = os.WriteFile(finishedMark(outDir, info.SHA256), mark, 0o600)
 	return final, nil
 }
 
