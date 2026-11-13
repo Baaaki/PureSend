@@ -14,9 +14,10 @@ require (
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/pion/stun/v4 v4.0.1
 	github.com/prometheus/client_golang v1.24.1
-	github.com/schollz/pake/v3 v3.2.0
+	github.com/schollz/pake/v3 v3.2.1
 	go.uber.org/fx v1.24.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -111,7 +112,6 @@ require (
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260922173722-c6096d2f4a49 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
