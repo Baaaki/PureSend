@@ -47,6 +47,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -403,8 +404,17 @@ func startHealthServer(addr, peerID string, registry *rendezvous.Registry, metri
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"peer_id\":%q,\"active_rooms\":%d}\n",
-			version, peerID, registry.ActiveRooms())
+		_ = json.NewEncoder(w).Encode(struct {
+			Status      string `json:"status"`
+			Version     string `json:"version"`
+			PeerID      string `json:"peer_id"`
+			ActiveRooms int    `json:"active_rooms"`
+		}{
+			Status:      "ok",
+			Version:     version,
+			PeerID:      peerID,
+			ActiveRooms: registry.ActiveRooms(),
+		})
 	})
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics, promhttp.HandlerOpts{}))
 
@@ -449,43 +459,70 @@ func registerMetrics(r *prometheus.Registry, peerID string, reg *rendezvous.Regi
 	// with a second one is a registration panic at startup.
 	wrapped := prometheus.WrapRegistererWith(
 		prometheus.Labels{"peer_id": peerID, "build": version}, r)
+	wrapped.MustRegister(newRegistryCollector(reg))
+}
 
-	// Counters for things that only ever go up, gauges for things that
-	// move both ways — the distinction is what lets rate() mean anything.
-	counter := func(name, help string, read func(rendezvous.Stats) uint64) {
-		wrapped.MustRegister(prometheus.NewCounterFunc(
-			prometheus.CounterOpts{Namespace: "puresend", Name: name, Help: help},
-			func() float64 { return float64(read(reg.Stats())) },
-		))
+// registryCollector snapshots registry stats once per Prometheus scrape
+// instead of locking and sweeping the registry separately for every metric.
+type registryCollector struct {
+	reg *rendezvous.Registry
+
+	activeRooms      *prometheus.Desc
+	roomsOpened      *prometheus.Desc
+	roomsClosed      *prometheus.Desc
+	roomsExpired     *prometheus.Desc
+	roomsAbandoned   *prometheus.Desc
+	roomsEvicted     *prometheus.Desc
+	lookupsFound     *prometheus.Desc
+	lookupsNotFound  *prometheus.Desc
+	lookupsThrottled *prometheus.Desc
+	requestsRejected *prometheus.Desc
+}
+
+func newRegistryCollector(reg *rendezvous.Registry) *registryCollector {
+	desc := func(name, help string) *prometheus.Desc {
+		return prometheus.NewDesc("puresend_"+name, help, nil, nil)
 	}
+	return &registryCollector{
+		reg:              reg,
+		activeRooms:      desc("active_rooms", "Room codes currently registered."),
+		roomsOpened:      desc("rooms_opened_total", "Rooms registered since start."),
+		roomsClosed:      desc("rooms_closed_total", "Rooms retired by their owner after a completed transfer."),
+		roomsExpired:     desc("rooms_expired_total", "Rooms dropped at the end of their hour."),
+		roomsAbandoned:   desc("rooms_abandoned_total", "Rooms dropped because their owner disconnected and did not come back."),
+		roomsEvicted:     desc("rooms_evicted_total", "Rooms whose owner had disconnected, dropped early to make space in a full table."),
+		lookupsFound:     desc("lookups_found_total", "Lookups that matched a live room."),
+		lookupsNotFound:  desc("lookups_not_found_total", "Lookups for a room number nobody holds: a wrong or expired code."),
+		lookupsThrottled: desc("lookups_throttled_total", "Lookups refused by the rate limiter."),
+		requestsRejected: desc("requests_rejected_total", "Requests refused for any other reason."),
+	}
+}
 
-	wrapped.MustRegister(prometheus.NewGaugeFunc(
-		prometheus.GaugeOpts{
-			Namespace: "puresend",
-			Name:      "active_rooms",
-			Help:      "Room codes currently registered.",
-		},
-		func() float64 { return float64(reg.Stats().ActiveRooms) },
-	))
+func (c *registryCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.activeRooms
+	ch <- c.roomsOpened
+	ch <- c.roomsClosed
+	ch <- c.roomsExpired
+	ch <- c.roomsAbandoned
+	ch <- c.roomsEvicted
+	ch <- c.lookupsFound
+	ch <- c.lookupsNotFound
+	ch <- c.lookupsThrottled
+	ch <- c.requestsRejected
+}
 
-	counter("rooms_opened_total", "Rooms registered since start.",
-		func(s rendezvous.Stats) uint64 { return s.Registered })
-	counter("rooms_closed_total", "Rooms retired by their owner after a completed transfer.",
-		func(s rendezvous.Stats) uint64 { return s.Unregistered })
-	counter("rooms_expired_total", "Rooms dropped at the end of their hour.",
-		func(s rendezvous.Stats) uint64 { return s.Expired })
-	counter("rooms_abandoned_total", "Rooms dropped because their owner disconnected and did not come back.",
-		func(s rendezvous.Stats) uint64 { return s.Abandoned })
-	counter("rooms_evicted_total", "Rooms whose owner had disconnected, dropped early to make space in a full table.",
-		func(s rendezvous.Stats) uint64 { return s.Evicted })
-	counter("lookups_found_total", "Lookups that matched a live room.",
-		func(s rendezvous.Stats) uint64 { return s.LookupsFound })
-	counter("lookups_not_found_total", "Lookups for a room number nobody holds: a wrong or expired code.",
-		func(s rendezvous.Stats) uint64 { return s.LookupsNotFound })
-	counter("lookups_throttled_total", "Lookups refused by the rate limiter.",
-		func(s rendezvous.Stats) uint64 { return s.LookupsThrottled })
-	counter("requests_rejected_total", "Requests refused for any other reason.",
-		func(s rendezvous.Stats) uint64 { return s.Rejected })
+func (c *registryCollector) Collect(ch chan<- prometheus.Metric) {
+	s := c.reg.Stats()
+	ch <- prometheus.MustNewConstMetric(c.activeRooms, prometheus.GaugeValue, float64(s.ActiveRooms))
+	ch <- prometheus.MustNewConstMetric(c.roomsOpened, prometheus.CounterValue, float64(s.Registered))
+	ch <- prometheus.MustNewConstMetric(c.roomsClosed, prometheus.CounterValue, float64(s.Unregistered))
+	ch <- prometheus.MustNewConstMetric(c.roomsExpired, prometheus.CounterValue, float64(s.Expired))
+	ch <- prometheus.MustNewConstMetric(c.roomsAbandoned, prometheus.CounterValue, float64(s.Abandoned))
+	ch <- prometheus.MustNewConstMetric(c.roomsEvicted, prometheus.CounterValue, float64(s.Evicted))
+	ch <- prometheus.MustNewConstMetric(c.lookupsFound, prometheus.CounterValue, float64(s.LookupsFound))
+	ch <- prometheus.MustNewConstMetric(c.lookupsNotFound, prometheus.CounterValue, float64(s.LookupsNotFound))
+	ch <- prometheus.MustNewConstMetric(c.lookupsThrottled, prometheus.CounterValue, float64(s.LookupsThrottled))
+	ch <- prometheus.MustNewConstMetric(c.requestsRejected, prometheus.CounterValue, float64(s.Rejected))
 }
 
 // envOr returns the environment variable's value, or fallback when it is

@@ -550,22 +550,27 @@ func TestUnregisterAndReRegisterPreservesCreatedAt(t *testing.T) {
 	}
 }
 
-func TestLookupsMapCapAndHardMissLimit(t *testing.T) {
+func TestLookupsMapCapAndNoGlobalKillSwitch(t *testing.T) {
 	r := NewRegistry()
 	np := open(t, r, sender)
 
-	// Hard global miss cap stops fresh-identity walking floods completely.
-	for i := range maxGlobalMissesHard {
+	// Even a sustained miss flood must not become a kill switch that locks
+	// out a real user's first lookup.
+	for i := range 1200 {
 		id := peer.ID(fmt.Sprintf("bot-%d", i))
 		if resp := lookup(r, id, unused(r)); resp.Type != "not_found" {
 			t.Fatalf("miss %d got %+v, want not_found", i, resp)
 		}
 	}
-	if resp := lookup(r, peer.ID("bot-over-hard-cap"), np); resp.Type != "error" {
-		t.Fatalf("lookup past hard global miss cap got %+v, want error", resp)
+	if resp := lookup(r, peer.ID("real-user-first-try"), np); resp.Type != "found" {
+		t.Fatalf("real user's first lookup under heavy miss flood got %+v, want found", resp)
+	}
+	// A second lookup from that same peer under pressure is still refused.
+	if resp := lookup(r, peer.ID("real-user-first-try"), np); resp.Type != "error" {
+		t.Fatalf("second lookup under pressure got %+v, want error", resp)
 	}
 
-	// Reset globalMiss and verify maxLookupPeers cap bounds the map.
+	// Verify maxLookupPeers cap still bounds the lookups map in memory.
 	r2 := NewRegistry()
 	now := time.Now()
 	for i := range maxLookupPeers {
@@ -576,5 +581,22 @@ func TestLookupsMapCapAndHardMissLimit(t *testing.T) {
 	}
 	if len(r2.lookups) > maxLookupPeers {
 		t.Errorf("len(lookups) = %d, exceeds maxLookupPeers (%d)", len(r2.lookups), maxLookupPeers)
+	}
+}
+
+func TestAbandonedRoomsRespectRetiredCap(t *testing.T) {
+	r := NewRegistry()
+	now := time.Now()
+	for i := range maxLookupPeers {
+		r.retired[fmt.Sprintf("r%d", i)] = roomEntry{createdAt: now}
+	}
+	r.rooms["42"] = roomEntry{
+		info:      peer.AddrInfo{ID: sender},
+		createdAt: now,
+		ownerGone: now.Add(-ownerGrace - time.Second),
+	}
+	r.dropExpired()
+	if len(r.retired) > maxLookupPeers {
+		t.Errorf("len(retired) = %d, exceeds maxLookupPeers (%d)", len(r.retired), maxLookupPeers)
 	}
 }

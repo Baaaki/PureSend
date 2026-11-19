@@ -69,11 +69,12 @@ func (p *publicAddress) setQUIC(addr *net.UDPAddr) {
 // which is only right on a router that keeps ports.
 func (p *publicAddress) rewrite(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	ip, quic := p.IP(), p.quic.Load()
+	dockerIPs := containerBridgeIPs()
 	var result []multiaddr.Multiaddr
 	for _, a := range addrs {
-		// Skip Docker container bridge networks (172.16.0.0/12) which
-		// bloat the multiaddr list and push useful addrs past MaxAddrs.
-		if isDockerAddr(a) {
+		// Skip container/virtual bridge networks which bloat the multiaddr
+		// list and push useful addrs past MaxAddrs.
+		if isDockerAddrIn(a, dockerIPs) {
 			continue
 		}
 		result = append(result, a)
@@ -284,11 +285,70 @@ func resolveUDP4(ctx context.Context, hostport string) (*net.UDPAddr, error) {
 	return &net.UDPAddr{IP: ips[0].AsSlice(), Port: port}, nil
 }
 
-// isDockerAddr reports whether a multiaddr belongs to a Docker container
-// bridge network (RFC 1918 172.16.0.0/12: 172.16.0.0 to 172.31.255.255).
-// Developer machines often have 10+ Docker networks, which otherwise pollute
-// the advertised multiaddr list and push useful addresses past MaxAddrs.
+// containerBridgeIPs returns the set of IPv4 addresses bound to container
+// or virtual bridge interfaces on this host. It is a variable so tests can
+// inject interface addresses deterministically.
+var containerBridgeIPs = hostContainerBridgeIPs
+
+func hostContainerBridgeIPs() map[string]struct{} {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out map[string]struct{}
+	for _, iface := range ifaces {
+		if !isContainerInterface(iface.Name) {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				if out == nil {
+					out = make(map[string]struct{})
+				}
+				out[ip4.String()] = struct{}{}
+			}
+		}
+	}
+	return out
+}
+
+// isContainerInterface reports whether an OS network interface name belongs
+// to a local container or VM bridge (Docker, Podman, Kubernetes, libvirt,
+// etc.) rather than a real LAN/VPN interface.
+func isContainerInterface(name string) bool {
+	lower := strings.ToLower(name)
+	for _, prefix := range []string{
+		"docker", "br-", "veth", "podman", "cni", "flannel", "virbr", "kube", "calico", "lxcbr", "lxdbr",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDockerAddr reports whether a multiaddr belongs to a local container or
+// virtual bridge interface, rather than filtering out all of 172.16.0.0/12
+// (which also contains legitimate corporate LAN and VPN networks).
 func isDockerAddr(a multiaddr.Multiaddr) bool {
+	return isDockerAddrIn(a, containerBridgeIPs())
+}
+
+func isDockerAddrIn(a multiaddr.Multiaddr, bridgeIPs map[string]struct{}) bool {
+	if len(bridgeIPs) == 0 {
+		return false
+	}
 	ipStr, err := a.ValueForProtocol(multiaddr.P_IP4)
 	if err != nil || ipStr == "" {
 		return false
@@ -301,7 +361,8 @@ func isDockerAddr(a multiaddr.Multiaddr) bool {
 	if ip4 == nil {
 		return false
 	}
-	return ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31
+	_, ok := bridgeIPs[ip4.String()]
+	return ok
 }
 
 // isLoopbackAddr reports whether a multiaddr points to a loopback interface

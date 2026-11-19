@@ -98,12 +98,11 @@ const ownerGrace = 1 * time.Minute
 // Someone typing the code they were given gets their first lookup
 // answered, however much else is going on.
 const (
-	lookupWindow        = 1 * time.Minute
-	maxLookups          = 5
-	maxGlobalMisses     = 200
-	maxGlobalMissesHard = 1000
-	maxLookupPeers      = 10_000
-	sweepInterval       = 1 * time.Second
+	lookupWindow    = 1 * time.Minute
+	maxLookups      = 5
+	maxGlobalMisses = 200
+	maxLookupPeers  = 10_000
+	sweepInterval   = 1 * time.Second
 )
 
 // Bounds on a single protocol message, so a malicious client cannot
@@ -568,9 +567,15 @@ func (r *Registry) unregister(from peer.ID, req Request) Response {
 }
 
 func (r *Registry) retireRoom(room string, entry roomEntry, now time.Time) {
+	r.retireRoomLocked(room, entry, now, true)
+}
+
+func (r *Registry) retireRoomLocked(room string, entry roomEntry, now time.Time, allowSweep bool) {
 	if _, exists := r.retired[room]; !exists && len(r.retired) >= maxLookupPeers {
-		r.dropExpired()
-		r.lastSweep = now
+		if allowSweep {
+			r.dropExpired()
+			r.lastSweep = now
+		}
 		if len(r.retired) >= maxLookupPeers {
 			for k := range r.retired {
 				delete(r.retired, k)
@@ -602,9 +607,8 @@ func (r *Registry) lookup(from peer.ID, req Request) Response {
 	lc := r.lookups[from].current(now, lookupWindow)
 	r.globalMiss = r.globalMiss.current(now, lookupWindow)
 	underPressure := r.globalMiss.count >= maxGlobalMisses
-	hardCap := r.globalMiss.count >= maxGlobalMissesHard
 
-	if lc.count >= maxLookups || (underPressure && lc.count > 0) || hardCap {
+	if lc.count >= maxLookups || (underPressure && lc.count > 0) {
 		r.stats.LookupsThrottled++
 		return Response{Type: "error", Error: "too many lookups, try again in a minute"}
 	}
@@ -689,7 +693,7 @@ func (r *Registry) checkRoom(room string, now time.Time) (roomEntry, bool) {
 		return roomEntry{}, false
 	case !e.ownerGone.IsZero() && now.Sub(e.ownerGone) > ownerGrace:
 		delete(r.rooms, room)
-		r.retired[room] = e
+		r.retireRoomLocked(room, e, now, false)
 		r.stats.Abandoned++
 		return roomEntry{}, false
 	}
@@ -754,7 +758,7 @@ func (r *Registry) dropExpired() {
 			r.stats.Expired++
 		case !e.ownerGone.IsZero() && now.Sub(e.ownerGone) > ownerGrace:
 			delete(r.rooms, room)
-			r.retired[room] = e
+			r.retireRoomLocked(room, e, now, false)
 			r.stats.Abandoned++
 		}
 	}

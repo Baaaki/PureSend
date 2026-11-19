@@ -526,7 +526,7 @@ func TestSafeJoinAcceptsOrdinaryPaths(t *testing.T) {
 func TestManifestSizeLimit(t *testing.T) {
 	outDir := t.TempDir()
 	m := Manifest{Files: []FileInfo{{
-		Path: strings.Repeat("a", 2<<20), // 2 MB name → manifest over the 1 MB cap
+		Path: strings.Repeat("a", maxManifestBytes+1), // exceeds maxManifestBytes cap
 		Size: 1,
 	}}}
 

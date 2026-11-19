@@ -21,6 +21,7 @@ type rateMeter struct {
 	// reaches a second sample still reports something honest.
 	startedAt  time.Time
 	startedAt0 int64
+	latest     int64
 }
 
 const (
@@ -42,6 +43,7 @@ func (r *rateMeter) reset(done int64) {
 		sampled:    done,
 		startedAt:  now,
 		startedAt0: done,
+		latest:     done,
 	}
 }
 
@@ -51,6 +53,7 @@ func (r *rateMeter) observe(done int64) {
 		r.reset(done)
 		return
 	}
+	r.latest = done
 	elapsed := time.Since(r.sampledAt)
 	if elapsed < sampleInterval {
 		return
@@ -80,10 +83,10 @@ func (r *rateMeter) rate() float64 {
 		return 0
 	}
 	elapsed := time.Since(r.startedAt).Seconds()
-	if elapsed < 0.2 {
+	if elapsed < 0.2 || r.latest <= r.startedAt0 {
 		return 0
 	}
-	return float64(r.sampled-r.startedAt0) / elapsed
+	return float64(r.latest-r.startedAt0) / elapsed
 }
 
 // eta estimates how long the remaining bytes will take. The second return

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,6 +32,10 @@ const (
 
 // Endpoint URL can be overridden in tests.
 var endpointURL = fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", defaultRepo)
+
+// allowInsecureDownload permits plain HTTP asset downloads only in unit tests
+// using httptest.NewServer. Production builds always require HTTPS.
+var allowInsecureDownload = false
 
 // publicKey is the minisign key a release's checksums.txt must be signed
 // with, baked in at build time:
@@ -68,36 +73,42 @@ type Asset struct {
 	Size               int64  `json:"size"`
 }
 
-// parseVersion extracts integer components from a semver string (e.g. "v0.3.1" -> [0, 3, 1]).
-func parseVersion(v string) ([]int, bool) {
+// parseVersion extracts integer components and optional pre-release suffix
+// from a semver string (e.g. "v0.3.1-rc.1" -> [0, 3, 1], "rc.1").
+func parseVersion(v string) ([]int, string, bool) {
 	v = strings.TrimPrefix(v, "v")
 	v = strings.TrimPrefix(v, "V")
 	v = strings.TrimSpace(v)
-	if idx := strings.IndexAny(v, "-+"); idx != -1 {
+	if idx := strings.IndexByte(v, '+'); idx != -1 {
+		v = v[:idx]
+	}
+	var prerelease string
+	if idx := strings.IndexByte(v, '-'); idx != -1 {
+		prerelease = v[idx+1:]
 		v = v[:idx]
 	}
 	if v == "" {
-		return nil, false
+		return nil, "", false
 	}
 	parts := strings.Split(v, ".")
 	nums := make([]int, len(parts))
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
 		if err != nil {
-			return nil, false
+			return nil, "", false
 		}
 		nums[i] = n
 	}
-	return nums, true
+	return nums, prerelease, true
 }
 
 // IsNewer reports whether the latest version is strictly newer than current.
 func IsNewer(latest, current string) bool {
-	latestNums, okLatest := parseVersion(latest)
+	latestNums, latestPre, okLatest := parseVersion(latest)
 	if !okLatest {
 		return false
 	}
-	currentNums, okCurrent := parseVersion(current)
+	currentNums, currentPre, okCurrent := parseVersion(current)
 	if !okCurrent {
 		// Non-semver current (e.g. "dev", "unknown") is considered older than a valid release.
 		return true
@@ -119,7 +130,14 @@ func IsNewer(latest, current string) bool {
 			return false
 		}
 	}
-	return false
+	// Equal numeric versions: a final release is newer than a pre-release.
+	if latestPre == "" && currentPre != "" {
+		return true
+	}
+	if latestPre != "" && currentPre == "" {
+		return false
+	}
+	return latestPre > currentPre
 }
 
 // CheckLatest queries GitHub for the latest release and compares it with currentVersion.
@@ -185,7 +203,7 @@ func FindAsset(assets []Asset, targetOS, targetArch string) *Asset {
 		// match a macOS archive named the Go way.
 		name = strings.ReplaceAll(name, "darwin", "macos")
 		for _, alias := range osAliases {
-			if strings.Contains(name, alias) {
+			if containsToken(name, alias) {
 				return true
 			}
 		}
@@ -194,7 +212,7 @@ func FindAsset(assets []Asset, targetOS, targetArch string) *Asset {
 
 	matchArch := func(name string) bool {
 		for _, alias := range archAliases {
-			if strings.Contains(name, alias) {
+			if containsToken(name, alias) {
 				return true
 			}
 		}
@@ -211,6 +229,30 @@ func FindAsset(assets []Asset, targetOS, targetArch string) *Asset {
 		}
 	}
 	return nil
+}
+
+func isAlphaNum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// containsToken reports whether needle appears in haystack bounded by
+// non-alphanumeric characters (or string edges), so "arm" does not match "arm64".
+func containsToken(haystack, needle string) bool {
+	for start := 0; start <= len(haystack)-len(needle); {
+		idx := strings.Index(haystack[start:], needle)
+		if idx < 0 {
+			return false
+		}
+		pos := start + idx
+		end := pos + len(needle)
+		leftOK := pos == 0 || !isAlphaNum(haystack[pos-1])
+		rightOK := end == len(haystack) || !isAlphaNum(haystack[end])
+		if leftOK && rightOK {
+			return true
+		}
+		start = pos + 1
+	}
+	return false
 }
 
 func isExcludedAsset(name string) bool {
@@ -281,6 +323,9 @@ func extractBinary(assetName string, r io.Reader, dst io.Writer) error {
 			return fmt.Errorf("could not read the zip archive: %w", err)
 		}
 		for _, f := range zr.File {
+			if f.FileInfo().IsDir() || !f.FileInfo().Mode().IsRegular() {
+				continue
+			}
 			base := filepath.Base(f.Name)
 			if base == "puresend" || base == "puresend.exe" {
 				rc, err := f.Open()
@@ -488,14 +533,37 @@ func checksumFor(sums []byte, name string) (string, error) {
 	return "", fmt.Errorf("checksums.txt has no valid digest for %s", name)
 }
 
-// download fetches a URL into memory, refusing anything over limit bytes.
-func download(ctx context.Context, url, userAgent string, limit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func validateDownloadURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL: %w", err)
+	}
+	if !allowInsecureDownload && !strings.EqualFold(u.Scheme, "https") {
+		return fmt.Errorf("refusing insecure download URL scheme %q", u.Scheme)
+	}
+	return nil
+}
+
+// download fetches a URL into memory, refusing anything over limit bytes
+// and rejecting non-HTTPS URLs or HTTPS-to-HTTP redirects in production.
+func download(ctx context.Context, rawURL, userAgent string, limit int64) ([]byte, error) {
+	if err := validateDownloadURL(rawURL); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("too many redirects")
+			}
+			return validateDownloadURL(req.URL.String())
+		},
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

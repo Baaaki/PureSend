@@ -72,7 +72,7 @@ func main() {
 			"URL of a list of meeting point addresses, used when none of -server answers")
 		out = flag.String("out", os.Getenv("FT_OUT"),
 			"folder to save incoming files in (default: your downloads folder)")
-		send        = flag.String("send", "", "headless: send these files or folders (comma-separated) and print a room code")
+		send        sendFlag
 		receive     = flag.String("receive", "", "headless: download the given room code and exit")
 		yes         = flag.Bool("yes", false, "headless: accept the incoming file list without asking")
 		showVersion = flag.Bool("version", false, "print version information and exit")
@@ -82,6 +82,7 @@ func main() {
 		flagLang = flag.String("lang", envOr("FT_LANG", ""),
 			"display language: tr, en, or auto (default: auto-detected OS language)")
 	)
+	flag.Var(&send, "send", "headless: send a file or folder (repeatable, or comma-separated) and print a room code")
 	flag.Parse()
 
 	userLang := *flagLang
@@ -125,7 +126,8 @@ func main() {
 		os.Exit(ExitCodeUsage)
 	}
 
-	if *send != "" && *receive != "" {
+	sendPaths := send.paths()
+	if len(sendPaths) > 0 && *receive != "" {
 		if i18n.Normalize(userLang) == i18n.EN {
 			fmt.Fprintln(os.Stderr, "Error: -send and -receive cannot be used together.")
 		} else {
@@ -134,7 +136,7 @@ func main() {
 		os.Exit(ExitCodeUsage)
 	}
 
-	if *send != "" && *yes {
+	if len(sendPaths) > 0 && *yes {
 		if i18n.Normalize(userLang) == i18n.EN {
 			fmt.Fprintln(os.Stderr, "Error: -yes is only valid with -receive.")
 		} else {
@@ -143,7 +145,7 @@ func main() {
 		os.Exit(ExitCodeUsage)
 	}
 
-	if *send != "" && *out != "" {
+	if len(sendPaths) > 0 && *out != "" {
 		if i18n.Normalize(userLang) == i18n.EN {
 			fmt.Fprintln(os.Stderr, "Error: -out is used for downloading files (-receive), not sending.")
 		} else {
@@ -185,8 +187,8 @@ func main() {
 	stunOpt := p2p.WithSTUNServers(stunList)
 
 	switch {
-	case *send != "":
-		run(headless.Send(servers, splitList(*send), userLang, list, stunOpt), userLang)
+	case len(sendPaths) > 0:
+		run(headless.Send(servers, sendPaths, userLang, list, stunOpt), userLang)
 	case *receive != "":
 		run(headless.Receive(servers, *receive, outDir, *yes, userLang, list, stunOpt), userLang)
 	default:
@@ -338,7 +340,41 @@ func determineExitCode(err error) int {
 	}
 }
 
-// splitList parses a comma-separated list of paths.
+// sendFlag collects one or more -send flag values. Each value is treated as a
+// single path if it exists verbatim on disk (so filenames containing commas
+// work), and otherwise split on commas for backwards compatibility.
+type sendFlag struct {
+	raw []string
+}
+
+func (f *sendFlag) String() string {
+	return strings.Join(f.raw, ",")
+}
+
+func (f *sendFlag) Set(v string) error {
+	if v = strings.TrimSpace(v); v != "" {
+		f.raw = append(f.raw, v)
+	}
+	return nil
+}
+
+func (f *sendFlag) paths() []string {
+	var out []string
+	for _, entry := range f.raw {
+		if strings.Contains(entry, ",") {
+			if _, err := os.Stat(entry); err == nil {
+				out = append(out, entry)
+				continue
+			}
+			out = append(out, splitList(entry)...)
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// splitList parses a comma-separated list of values.
 func splitList(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {

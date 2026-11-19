@@ -21,8 +21,11 @@ const (
 
 // DetectOS detects the operating system language and returns TR or EN.
 func DetectOS() Lang {
-	loc := strings.ToLower(osLocale())
-	if strings.Contains(loc, "tr") {
+	loc := strings.ToLower(strings.TrimSpace(osLocale()))
+	if idx := strings.IndexAny(loc, "_-.@"); idx != -1 {
+		loc = loc[:idx]
+	}
+	if loc == "tr" {
 		return TR
 	}
 	return EN
@@ -460,8 +463,8 @@ var enMessages = &Messages{
 
 	EnterTitle:       "📥  Enter the code from your friend",
 	EnterHelp1:       "Your friend generated a room code for you.",
-	EnterHelp2:       "It looks like: cherry-harbor-42",
-	EnterPlaceholder: "cherry-harbor-42",
+	EnterHelp2:       "It looks like: kiraz-liman-42",
+	EnterPlaceholder: "kiraz-liman-42",
 	EnterSavingTo:    "Incoming files will be saved to:",
 	EnterFooter:      "[Enter] Confirm & Connect  ·  [Ctrl+O] Change Folder  ·  [Esc] Main Menu  ·  [Ctrl+C] Quit",
 
@@ -632,7 +635,7 @@ func Explain(err error, lang Lang) (string, []string) {
 				}
 			}
 			return fmt.Sprintf("%q is not a room code.", ce.Code), []string{
-				"A room code consists of two words and a number, e.g. cherry-harbor-42.",
+				"A room code consists of two words and a number, e.g. kiraz-liman-42.",
 			}
 		}
 
@@ -734,7 +737,7 @@ func Explain(err error, lang Lang) (string, []string) {
 			}
 		case has("not a room code", "malformed room"):
 			return "This is not a valid room code.", []string{
-				"A room code consists of two words and a number, e.g. cherry-harbor-42.",
+				"A room code consists of two words and a number, e.g. kiraz-liman-42.",
 			}
 		case has("not used in room codes"):
 			return "Unrecognized word in room code.", []string{

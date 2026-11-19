@@ -140,7 +140,7 @@ puresend -receive kiraz-liman-42 -out /var/backups -yes
 puresend -update
 ```
 
-Çıkış kodları betikler için sabittir: `0` başarı, `2` hatalı bayrak, `3` ağa ulaşılamadı, `4` yanlış kod ya da süresi dolmuş oda, `5` transfer reddedildi, `6` G/Ç ya da sağlama hatası, `130` kesildi.
+Çıkış kodları betikler için sabittir: `0` başarı, `2` hatalı bayrak, `3` ağa ulaşılamadı, `4` yanlış kod ya da süresi dolmuş oda, `5` G/Ç ya da sağlama hatası, `6` transfer reddedildi, `130` kesildi.
 
 ### Kaynaktan Derleme
 

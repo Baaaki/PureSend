@@ -154,9 +154,12 @@ func (m Model) handleEvent(ev p2p.Event) (tea.Model, tea.Cmd) {
 		return m, waitEvent(m.node)
 
 	case p2p.RoomLostEvent:
+		m.room = ""
+		m.haveConn = false
+		m.retrying = false
 		m.err = e.Err
 		m.screen = screenError
-		return m, waitEvent(m.node)
+		return m, nil
 
 	case p2p.ManifestEvent:
 		m.manifest = e.Manifest

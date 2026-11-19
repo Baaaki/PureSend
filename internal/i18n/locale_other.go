@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -19,11 +20,13 @@ func osLocale() string {
 	}
 
 	// On macOS, if terminal environment variables are unset, check AppleLocale
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if out, err := exec.CommandContext(ctx, "defaults", "read", "-g", "AppleLocale").Output(); err == nil {
-		if loc := strings.TrimSpace(string(out)); loc != "" {
-			return loc
+	if runtime.GOOS == "darwin" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if out, err := exec.CommandContext(ctx, "defaults", "read", "-g", "AppleLocale").Output(); err == nil {
+			if loc := strings.TrimSpace(string(out)); loc != "" {
+				return loc
+			}
 		}
 	}
 

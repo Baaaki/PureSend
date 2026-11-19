@@ -59,15 +59,19 @@ func Collect(paths []string) ([]Entry, error) {
 
 		base := filepath.Base(clean)
 		root := uniqueTopName(base, usedTop)
+		walkRoot := clean
+		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+			walkRoot = resolved
+		}
 		before := len(entries)
-		err = filepath.WalkDir(clean, func(p string, d fs.DirEntry, err error) error {
+		err = filepath.WalkDir(walkRoot, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() || !d.Type().IsRegular() {
 				return nil
 			}
-			rel, err := filepath.Rel(clean, p)
+			rel, err := filepath.Rel(walkRoot, p)
 			if err != nil {
 				return err
 			}
@@ -249,11 +253,15 @@ func digest(ctx context.Context, e Entry) (digested, error) {
 	}
 
 	h := sha256.New()
-	if _, err := io.Copy(h, ctxReader{ctx, f}); err != nil {
+	n, err := io.Copy(h, ctxReader{ctx, f})
+	if err != nil {
 		if ctx.Err() != nil {
 			return digested{}, ctx.Err()
 		}
 		return digested{}, SourceError{fmt.Errorf("could not read %s: %w", path.Base(e.Rel), err)}
+	}
+	if n != st.Size() {
+		return digested{}, fmt.Errorf("%w: size of %s changed while reading (expected %d, read %d)", ErrFileModified, path.Base(e.Rel), st.Size(), n)
 	}
 	return digested{
 		info:    FileInfo{Path: e.Rel, Size: st.Size(), SHA256: hex.EncodeToString(h.Sum(nil))},

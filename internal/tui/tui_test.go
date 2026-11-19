@@ -1028,3 +1028,37 @@ func TestPickFolderRejectsUnsafeDirectories(t *testing.T) {
 		t.Errorf("picking $HOME with 'f' should be rejected, got %+v", next.picked)
 	}
 }
+
+func TestRoomLostClearsRoomAgainstTrailingDoneEvent(t *testing.T) {
+	m := New(Config{Servers: []string{"x"}})
+	m.mode = modeSend
+	m.screen = screenTransfer
+	m.room = "kiraz-liman-42"
+
+	m = event(t, m, p2p.RoomLostEvent{Err: p2p.ErrRoomExpired})
+	if m.screen != screenError || m.room != "" {
+		t.Fatalf("after RoomLostEvent: screen=%v room=%q, want screenError and empty room", m.screen, m.room)
+	}
+	m = event(t, m, p2p.DoneEvent{Err: fmt.Errorf("stream reset")})
+	if m.screen != screenError {
+		t.Fatalf("trailing DoneEvent after RoomLost bounced screen to %v, want screenError", m.screen)
+	}
+}
+
+func TestConfirmWarnsAboutNestedHiddenEntries(t *testing.T) {
+	var files []transfer.FileInfo
+	for i := range 15 {
+		files = append(files, transfer.FileInfo{Path: fmt.Sprintf("project/file%02d.txt", i), Size: 100})
+	}
+	files = append(files, transfer.FileInfo{Path: "project/.git/hooks/post-checkout", Size: 50})
+
+	m := New(Config{Servers: []string{"x"}})
+	m.mode = modeReceive
+	m.screen = screenConfirm
+	m.manifest = transfer.Manifest{Files: files}
+	view := m.render()
+
+	if !strings.Contains(view, "Gizli öğeler var") || !strings.Contains(view, "project/.git/") {
+		t.Errorf("confirm screen did not warn about nested hidden folder:\n%s", view)
+	}
+}

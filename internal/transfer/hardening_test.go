@@ -904,3 +904,194 @@ func FuzzValidDigest(f *testing.F) {
 		}
 	})
 }
+
+// TestMalformedPAKEPayloadsDoNotPanic guards against remote nil-pointer
+// panics in schollz/pake when a peer sends JSON "null", "{}", or missing
+// elliptic curve coordinates.
+func TestMalformedPAKEPayloadsDoNotPanic(t *testing.T) {
+	payloads := map[string][]byte{
+		"null":       []byte("null"),
+		"empty obj":  []byte("{}"),
+		"missing Xv": []byte(`{"Role":0,"Xᵤ":1}`),
+		"missing Yv": []byte(`{"Role":1,"Yᵤ":1}`),
+		"wrong role": []byte(`{"Role":1,"Xᵤ":1,"Xᵥ":2}`),
+	}
+
+	for name, raw := range payloads {
+		t.Run("sender/"+name, func(t *testing.T) {
+			src := writeTempFile(t, t.TempDir(), "a.txt", []byte("data"))
+			offer, _ := NewOffer([]string{src})
+			sender, attacker := net.Pipe()
+			defer attacker.Close()
+
+			sendErr := make(chan error, 1)
+			go func() {
+				sendErr <- Send(sender, offer, testCreds(), SendOptions{})
+			}()
+
+			if err := json.NewEncoder(attacker).Encode(authMsg{PAKE: raw}); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-sendErr; !errors.Is(err, ErrWrongCode) {
+				t.Errorf("sender got %v, want ErrWrongCode", err)
+			}
+		})
+
+		t.Run("receiver/"+name, func(t *testing.T) {
+			sender, receiver := net.Pipe()
+			defer sender.Close()
+
+			go func() {
+				var first authMsg
+				_ = json.NewDecoder(sender).Decode(&first)
+				_ = json.NewEncoder(sender).Encode(authMsg{PAKE: raw})
+			}()
+
+			if _, err := Receive(receiver, t.TempDir(), testCreds(), nil, Hooks{}); !errors.Is(err, ErrWrongCode) {
+				t.Errorf("receiver got %v, want ErrWrongCode", err)
+			}
+		})
+	}
+}
+
+// TestEmptyCompressedChunkRejected ensures a valid 0-byte DEFLATE block
+// cannot spin receiveFile forever while refreshing the idle deadline.
+func TestEmptyCompressedChunkRejected(t *testing.T) {
+	payload := []byte("hello world")
+	m := Manifest{
+		Files:      []FileInfo{{Path: "a.txt", Size: int64(len(payload)), SHA256: digestOf(payload)}},
+		Compressed: true,
+	}
+	emptyComp := CompressChunk(nil, nil)
+	frame := make([]byte, 4, 4+len(emptyComp))
+	binary.BigEndian.PutUint32(frame, uint32(len(emptyComp))|compressionFlag)
+	frame = append(frame, emptyComp...)
+
+	outDir := t.TempDir()
+	sender, receiver := net.Pipe()
+	go fakeSend(t, sender, m, frame)
+
+	if _, err := Receive(receiver, outDir, testCreds(), nil, Hooks{}); err == nil || !strings.Contains(err.Error(), "empty chunk") {
+		t.Fatalf("empty compressed chunk got %v, want empty chunk error", err)
+	}
+}
+
+// TestResumeIdenticalFilesAfterFirstFinishes guards against a bug where
+// keying .done marks solely by SHA-256 caused the second copy of an
+// identical file to be skipped on resume once the first copy had finished.
+func TestResumeIdenticalFilesAfterFirstFinishes(t *testing.T) {
+	srcDir := t.TempDir()
+	outDir := t.TempDir()
+	photo := make([]byte, 120_000)
+	_, _ = rand.Read(photo)
+	writeTempFile(t, srcDir, "album/bir.jpg", photo)
+	writeTempFile(t, srcDir, "album/iki.jpg", photo)
+	root := filepath.Join(srcDir, "album")
+
+	// Cut after bir.jpg is complete (~120 KB) and halfway through iki.jpg.
+	sender, receiver := net.Pipe()
+	go SendPaths(&cutAfter{Conn: sender, left: 180_000}, []string{root}, testCreds(), Hooks{})
+	if _, err := Receive(receiver, outDir, testCreds(), nil, Hooks{}); err == nil {
+		t.Fatal("the interrupted transfer reported success")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "album", "bir.jpg")); err != nil {
+		t.Fatalf("setup: bir.jpg should have finished in first attempt: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "album", "iki.jpg")); !os.IsNotExist(err) {
+		t.Fatalf("setup: iki.jpg should not have finished in first attempt")
+	}
+
+	// Resume: both bir.jpg and iki.jpg must end up on disk intact.
+	sender, receiver = net.Pipe()
+	sendErr := make(chan error, 1)
+	go func() { sendErr <- SendPaths(sender, []string{root}, testCreds(), Hooks{}) }()
+	saved, err := Receive(receiver, outDir, testCreds(), nil, Hooks{})
+	if err != nil {
+		t.Fatalf("resumed Receive: %v", err)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("resumed Send: %v", err)
+	}
+	if len(saved) != 2 || saved[0] == saved[1] {
+		t.Fatalf("saved = %v, want two distinct paths", saved)
+	}
+	for _, name := range []string{"bir.jpg", "iki.jpg"} {
+		got, err := os.ReadFile(filepath.Join(outDir, "album", name))
+		if err != nil || !bytes.Equal(got, photo) {
+			t.Errorf("%s missing or corrupted after resume: %v", name, err)
+		}
+	}
+}
+
+// TestHaveAlreadyDoesNotFollowLeafSymlink verifies a leaf symlink sitting at
+// target is never followed when checking whether a file already matches.
+func TestHaveAlreadyDoesNotFollowLeafSymlink(t *testing.T) {
+	outDir, elsewhere := t.TempDir(), t.TempDir()
+	secret := []byte("outside secret")
+	outside := writeTempFile(t, elsewhere, "secret.txt", secret)
+	link := filepath.Join(outDir, "secret.txt")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	info := FileInfo{Path: "secret.txt", Size: int64(len(secret)), SHA256: digestOf(secret)}
+	if haveAlready(link, info, func() {}) {
+		t.Fatal("haveAlready followed a leaf symlink outside outDir")
+	}
+}
+
+// TestAlreadyOnDiskAccountsForPartialsAndMarks verifies resume disk space
+// estimation subtracts bytes already present in .part files and finished files.
+func TestAlreadyOnDiskAccountsForPartialsAndMarks(t *testing.T) {
+	outDir := t.TempDir()
+	data1 := bytes.Repeat([]byte("a"), 1000)
+	data2 := bytes.Repeat([]byte("b"), 2000)
+	f1 := FileInfo{Path: "one.bin", Size: 1000, SHA256: digestOf(data1)}
+	f2 := FileInfo{Path: "two.bin", Size: 2000, SHA256: digestOf(data2)}
+	m := Manifest{Files: []FileInfo{f1, f2}}
+	targets, err := checkManifest(outDir, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate f1 finished and f2 halfway downloaded.
+	writeTempFile(t, outDir, "one.bin", data1)
+	if err := os.MkdirAll(filepath.Join(outDir, partialDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(finishedMark(outDir, f1.Path, f1.SHA256), []byte("one.bin"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, partialDir, f2.SHA256+".part"), data2[:750], 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := alreadyOnDisk(outDir, m, targets); got != 1750 {
+		t.Errorf("alreadyOnDisk = %d, want 1750", got)
+	}
+}
+
+// TestCollectSymlinkedDirectory verifies passing a top-level symlink to a
+// directory still walks the directory's regular files while skipping
+// symlinks nested inside it.
+func TestCollectSymlinkedDirectory(t *testing.T) {
+	realDir := t.TempDir()
+	writeTempFile(t, realDir, "inside.txt", []byte("ok"))
+	outside := writeTempFile(t, t.TempDir(), "outside.txt", []byte("nope"))
+	if err := os.Symlink(outside, filepath.Join(realDir, "nested-link.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	linkDir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	entries, err := Collect([]string{linkDir})
+	if err != nil {
+		t.Fatalf("Collect(symlinked dir): %v", err)
+	}
+	if len(entries) != 1 || entries[0].Rel != "shared/inside.txt" {
+		t.Fatalf("Collect = %+v, want single entry shared/inside.txt", entries)
+	}
+}

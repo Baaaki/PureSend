@@ -297,7 +297,7 @@ func (m Model) viewConfirm() string {
 			}
 		}
 	}
-	if hidden := hiddenNames(entries); hidden != "" {
+	if hidden := hiddenNames(entries, files); hidden != "" {
 		b.WriteString("\n" + m.st.warn.Render(t.ConfirmHidden(hidden)) + "\n")
 	}
 
@@ -370,22 +370,56 @@ func topLevel(m transfer.Manifest) []topEntry {
 
 func isHidden(name string) bool { return strings.HasPrefix(name, ".") }
 
-// hiddenNames lists the hidden entries for the warning, a few at most.
-func hiddenNames(entries []topEntry) string {
+// hiddenNames lists hidden entries for the warning, a few at most: both
+// top-level hidden files/folders and hidden entries nested inside folders.
+func hiddenNames(entries []topEntry, files []transfer.FileInfo) string {
 	const most = 5
 	var names []string
+	seen := make(map[string]bool)
+	add := func(label string) bool {
+		if seen[label] {
+			return false
+		}
+		if len(names) == most {
+			names = append(names, "…")
+			return true
+		}
+		seen[label] = true
+		names = append(names, label)
+		return false
+	}
+
 	for _, e := range entries {
 		if !isHidden(e.name) {
 			break // they come first
 		}
-		if len(names) == most {
-			names = append(names, "…")
-			break
-		}
+		label := e.name
 		if e.dir {
-			names = append(names, e.name+"/")
-		} else {
-			names = append(names, e.name)
+			label += "/"
+		}
+		if add(label) {
+			return strings.Join(names, ", ")
+		}
+	}
+	for _, f := range files {
+		var parts []string
+		for part := range strings.SplitSeq(f.Path, "/") {
+			if part == "" || part == "." {
+				continue
+			}
+			parts = append(parts, part)
+		}
+		for i := 1; i < len(parts); i++ {
+			if isHidden(parts[i]) {
+				label := strings.Join(parts[:i+1], "/")
+				if i < len(parts)-1 {
+					label += "/"
+				}
+				if add(label) {
+					return strings.Join(names, ", ")
+				}
+				break
+			}
 		}
 	}
 	return strings.Join(names, ", ")

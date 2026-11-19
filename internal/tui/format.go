@@ -28,7 +28,7 @@ func codeProblem(err error, lang i18n.Lang) string {
 		return fmt.Sprintf("\"%s\" kodlarda geçen bir kelime değil — yazımını kontrol et.", ce.Word)
 	}
 	if lang == i18n.EN {
-		return "Room code consists of two words and a number, e.g. cherry-harbor-42."
+		return "Room code consists of two words and a number, e.g. kiraz-liman-42."
 	}
 	return "Kod iki kelime ve bir sayıdan oluşur, örneğin kiraz-liman-42."
 }

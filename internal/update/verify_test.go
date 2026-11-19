@@ -93,6 +93,9 @@ func (k testKey) sign(message []byte) []byte {
 // GitHub API does.
 func release(t *testing.T, files map[string][]byte) []Asset {
 	t.Helper()
+	saved := allowInsecureDownload
+	allowInsecureDownload = true
+	t.Cleanup(func() { allowInsecureDownload = saved })
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
 		if !ok {

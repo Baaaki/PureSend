@@ -26,6 +26,9 @@ func TestIsNewer(t *testing.T) {
 		{"1.0.0", "0.9.9", true},
 		{"v0.3.0", "v0.2.0", true},
 		{"v0.3.0-rc1", "v0.2.0", true},
+		{"v2.1.0", "v2.1.0-rc.1", true},
+		{"v2.1.0-rc.1", "v2.1.0", false},
+		{"v2.1.0-rc.2", "v2.1.0-rc.1", true},
 		{"0.2.0", "0.2.0", false},
 		{"v0.2.0", "0.2.0", false},
 		{"0.1.9", "0.2.0", false},
@@ -295,5 +298,45 @@ func TestCopyBoundedRejectsOversizedStream(t *testing.T) {
 	src := bytes.NewReader(bytes.Repeat([]byte("a"), 1025))
 	if err := copyBounded(&dst, src, 1024); err == nil {
 		t.Fatal("expected copyBounded to fail when stream exceeds limit")
+	}
+}
+
+func TestFindAssetDoesNotMatchArmWithArm64(t *testing.T) {
+	assets := []Asset{
+		{Name: "puresend_2.0.9_linux_arm64.tar.gz", BrowserDownloadURL: "https://example.com/arm64"},
+	}
+	if got := FindAsset(assets, "linux", "arm"); got != nil {
+		t.Errorf("FindAsset(linux, arm) wrongly matched %s", got.Name)
+	}
+}
+
+func TestExtractBinaryZipSkipsDirectoryNamedPuresend(t *testing.T) {
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	if _, err := zw.Create("puresend/"); err != nil {
+		t.Fatal(err)
+	}
+	zf, err := zw.Create("puresend/puresend")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("real-binary")
+	if _, err := zf.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	_ = zw.Close()
+
+	var out bytes.Buffer
+	if err := extractBinary("puresend_2.0.9_linux_x86_64.zip", &zipBuf, &out); err != nil {
+		t.Fatalf("extractBinary zip: %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), want) {
+		t.Errorf("extracted %q, want %q", out.Bytes(), want)
+	}
+}
+
+func TestDownloadRefusesPlainHTTP(t *testing.T) {
+	if _, err := download(context.Background(), "http://example.com/puresend.tar.gz", "test", 1024); err == nil {
+		t.Fatal("download accepted a plain http:// URL")
 	}
 }

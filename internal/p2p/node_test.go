@@ -252,3 +252,56 @@ func TestFetchServerList(t *testing.T) {
 		}
 	}
 }
+
+// TestHandshakePerPeerLimitPreventsStarvation ensures a single remote peer
+// cannot occupy all global handshake slots and lock out other receivers.
+func TestHandshakePerPeerLimitPreventsStarvation(t *testing.T) {
+	n := newTestNode(t)
+	defer n.Close()
+
+	attacker := peer.ID("attacker")
+	friend := peer.ID("friend")
+
+	for i := range maxHandshakesPerPeer {
+		if !n.tryAcquireHandshake(attacker) {
+			t.Fatalf("slot %d for attacker refused prematurely", i)
+		}
+	}
+	if n.tryAcquireHandshake(attacker) {
+		t.Fatal("attacker exceeded maxHandshakesPerPeer")
+	}
+	if !n.tryAcquireHandshake(friend) {
+		t.Fatal("attacker holding its max slots starved a legitimate peer")
+	}
+	n.releaseHandshake(friend)
+	for range maxHandshakesPerPeer {
+		n.releaseHandshake(attacker)
+	}
+}
+
+// TestKeepRoomExpiresWithoutDisconnect verifies that a waiting room ends
+// with ErrRoomExpired after roomTTL even when the server connection never drops.
+func TestKeepRoomExpiresWithoutDisconnect(t *testing.T) {
+	savedTTL := roomTTL
+	roomTTL = 50 * time.Millisecond
+	t.Cleanup(func() { roomTTL = savedTTL })
+
+	n := newTestNode(t)
+	defer n.Close()
+	n.mu.Lock()
+	n.room = "kiraz-liman-42"
+	n.hostedAt = time.Now()
+	n.mu.Unlock()
+
+	go n.keepRoom()
+
+	select {
+	case ev := <-n.Events():
+		lost, ok := ev.(RoomLostEvent)
+		if !ok || lost.Err != ErrRoomExpired {
+			t.Fatalf("got event %#v, want RoomLostEvent{Err: ErrRoomExpired}", ev)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("room did not expire after roomTTL while connected")
+	}
+}

@@ -49,7 +49,8 @@ const ProtocolID = "/puresend/transfer/2.0.0"
 const (
 	// maxManifestBytes caps the manifest line so a malicious sender cannot
 	// exhaust the receiver's memory before the manifest is even parsed.
-	maxManifestBytes = 1 << 20
+	// Sized generously above 5000 entries with deep relative paths.
+	maxManifestBytes = 4 << 20
 
 	// maxAuthBytes caps a single handshake message.
 	maxAuthBytes = 16 << 10
@@ -307,10 +308,12 @@ func Send(s io.ReadWriteCloser, offer *Offer, creds Credentials, opts SendOption
 	if err := waitForOffer(offer, enc, dl); err != nil {
 		return err
 	}
-	manifest, err := offer.manifest(hooks)
+	manifest, err := manifestWithHeartbeats(offer, hooks, enc, dl)
 	if err != nil {
-		dl.write(timeouts.idle)
-		_ = enc.Encode(offerMsg{Error: "could not read the files being sent"})
+		if !errors.Is(err, errHeartbeatWrite) {
+			dl.write(timeouts.idle)
+			_ = enc.Encode(offerMsg{Error: "could not read the files being sent"})
+		}
 		return err
 	}
 	manifest.Compressed = true
@@ -381,6 +384,37 @@ func SendPaths(s io.ReadWriteCloser, paths []string, creds Credentials, hooks Ho
 		return err
 	}
 	return Send(s, offer, creds, SendOptions{Hooks: hooks})
+}
+
+var errHeartbeatWrite = errors.New("connection lost while preparing")
+
+// manifestWithHeartbeats fetches the manifest from o while keeping the
+// receiver's offerGap deadline alive if modified files must be re-hashed.
+func manifestWithHeartbeats(o *Offer, hooks Hooks, enc *json.Encoder, dl deadlines) (Manifest, error) {
+	type result struct {
+		m   Manifest
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		m, err := o.manifest(hooks)
+		ch <- result{m, err}
+	}()
+
+	total := o.Len()
+	tick := time.NewTicker(timeouts.heartbeat)
+	defer tick.Stop()
+	for {
+		select {
+		case res := <-ch:
+			return res.m, res.err
+		case <-tick.C:
+			dl.write(timeouts.idle)
+			if err := enc.Encode(offerMsg{Preparing: &preparing{Done: total, Total: total}}); err != nil {
+				return Manifest{}, fmt.Errorf("%w: %w", errHeartbeatWrite, describe(err))
+			}
+		}
+	}
 }
 
 // waitForOffer blocks until the offer has been read, telling the receiver
@@ -570,7 +604,10 @@ func Receive(s io.ReadWriteCloser, outDir string, creds Credentials, confirm fun
 		return nil, refuse(err)
 	}
 
-	if err := CheckAvailableSpace(outDir, manifest.TotalSize()); err != nil {
+	// Account for bytes already staged or finished on disk from an earlier
+	// interrupted attempt so resuming a large transfer on a tight disk works.
+	needed := max(manifest.TotalSize()-alreadyOnDisk(outDir, manifest, targets), 0)
+	if err := CheckAvailableSpace(outDir, needed); err != nil {
 		return nil, refuse(err)
 	}
 
@@ -707,22 +744,21 @@ func resumeFrom(outDir string, m Manifest, targets []string, hooks Hooks) ([]par
 
 	out := make([]partial, len(m.Files))
 	copies := make(map[string]int, len(m.Files))
+	claimed := make(map[string]bool, len(m.Files))
 	for i, f := range m.Files {
-		name := f.SHA256 + ".part"
-		if n := copies[f.SHA256]; n > 0 {
-			name = fmt.Sprintf("%s.%d.part", f.SHA256, n)
-		}
+		name := partialFileName(f.SHA256, copies[f.SHA256])
 		copies[f.SHA256]++
 		p := partial{path: filepath.Join(dir, name), hasher: sha256.New()}
 
-		if saved := finishedAt(outDir, targets[i], f, func() { hooks.prepare(f.Path, i+1, len(m.Files)) }); saved != "" {
+		if saved := finishedAt(outDir, targets[i], f, func() { hooks.prepare(f.Path, i+1, len(m.Files)) }); saved != "" && !claimed[saved] {
+			claimed[saved] = true
 			p.complete, p.offset = saved, f.Size
 			os.Remove(p.path)
 			out[i] = p
 			continue
 		}
 
-		st, err := os.Stat(p.path)
+		st, err := os.Lstat(p.path)
 		switch {
 		case err != nil || !st.Mode().IsRegular() || st.Size() == 0:
 			// Nothing usable; start from the beginning.
@@ -744,9 +780,51 @@ func resumeFrom(outDir string, m Manifest, targets []string, hooks Hooks) ([]par
 	return out, nil
 }
 
+func partialFileName(digest string, copyIndex int) string {
+	if copyIndex > 0 {
+		return fmt.Sprintf("%s.%d.part", digest, copyIndex)
+	}
+	return digest + ".part"
+}
+
+// alreadyOnDisk estimates how many bytes of m already sit in outDir from an
+// interrupted earlier attempt, using only metadata checks so no hashing or
+// writes happen before the user approves the transfer.
+func alreadyOnDisk(outDir string, m Manifest, targets []string) int64 {
+	dir := filepath.Join(outDir, partialDir)
+	copies := make(map[string]int, len(m.Files))
+	var have int64
+	for i, f := range m.Files {
+		partPath := filepath.Join(dir, partialFileName(f.SHA256, copies[f.SHA256]))
+		copies[f.SHA256]++
+
+		if finishedBefore(outDir, f.Path, f.SHA256) {
+			if st, err := os.Lstat(targets[i]); err == nil && st.Mode().IsRegular() && st.Size() == f.Size {
+				have += f.Size
+				continue
+			}
+			if data, err := os.ReadFile(finishedMark(outDir, f.Path, f.SHA256)); err == nil {
+				if rel := strings.TrimSpace(string(data)); rel != "" {
+					if saved, err := safeJoin(outDir, rel); err == nil {
+						if st, err := os.Lstat(saved); err == nil && st.Mode().IsRegular() && st.Size() == f.Size {
+							have += f.Size
+							continue
+						}
+					}
+				}
+			}
+		}
+		if st, err := os.Lstat(partPath); err == nil && st.Mode().IsRegular() && st.Size() > 0 && st.Size() <= f.Size {
+			have += st.Size()
+		}
+	}
+	return have
+}
+
 // haveAlready reports whether target already holds exactly this file.
+// Uses Lstat so a symbolic link sitting at target is never followed.
 func haveAlready(target string, f FileInfo, announce func()) bool {
-	st, err := os.Stat(target)
+	st, err := os.Lstat(target)
 	if err != nil || !st.Mode().IsRegular() || st.Size() != f.Size {
 		return false
 	}
@@ -759,28 +837,30 @@ func haveAlready(target string, f FileInfo, announce func()) bool {
 }
 
 // finishedMark is the file an attempt leaves behind in partialDir for each
-// file it finished, keyed by digest like the partial downloads themselves.
-func finishedMark(outDir, digest string) string {
-	return filepath.Join(outDir, partialDir, digest+".done")
+// file it finished, keyed by both relative path and digest so identical
+// files at different paths never shadow one another on resume.
+func finishedMark(outDir, relPath, digest string) string {
+	sum := sha256.Sum256([]byte(relPath + "\x00" + digest))
+	return filepath.Join(outDir, partialDir, hex.EncodeToString(sum[:])+".done")
 }
 
-// finishedBefore reports whether an earlier attempt finished a file with
-// this digest.
-func finishedBefore(outDir, digest string) bool {
-	st, err := os.Lstat(finishedMark(outDir, digest))
+// finishedBefore reports whether an earlier attempt finished this manifest
+// entry with this digest.
+func finishedBefore(outDir, relPath, digest string) bool {
+	st, err := os.Lstat(finishedMark(outDir, relPath, digest))
 	return err == nil && st.Mode().IsRegular()
 }
 
 // finishedAt returns the path where an earlier attempt placed f, if the
 // mark and the file on disk both still match.
 func finishedAt(outDir, target string, f FileInfo, announce func()) string {
-	if !finishedBefore(outDir, f.SHA256) {
+	if !finishedBefore(outDir, f.Path, f.SHA256) {
 		return ""
 	}
 	if checkNoLinks(outDir, target) == nil && haveAlready(target, f, announce) {
 		return target
 	}
-	data, err := os.ReadFile(finishedMark(outDir, f.SHA256))
+	data, err := os.ReadFile(finishedMark(outDir, f.Path, f.SHA256))
 	if err != nil {
 		return ""
 	}
@@ -802,7 +882,7 @@ func finishedAt(outDir, target string, f FileInfo, announce func()) string {
 // folder they were kept in if nothing else is waiting there.
 func forgetFinished(outDir string, m Manifest) {
 	for _, f := range m.Files {
-		os.Remove(finishedMark(outDir, f.SHA256))
+		os.Remove(finishedMark(outDir, f.Path, f.SHA256))
 	}
 	os.Remove(filepath.Join(outDir, partialDir)) // fails, harmlessly, unless empty
 }
@@ -906,6 +986,10 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 				plain = wireBuf
 			}
 
+			if len(plain) == 0 {
+				return "", fmt.Errorf("empty chunk for %s", info.Name())
+			}
+
 			// A chunk that runs past the end of the file is a lie about its
 			// size; the digest would catch it at the end, after the disk
 			// had taken all of it.
@@ -978,7 +1062,7 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 	if rel, err := filepath.Rel(outDir, final); err == nil {
 		mark = []byte(filepath.ToSlash(rel))
 	}
-	_ = os.WriteFile(finishedMark(outDir, info.SHA256), mark, 0o600)
+	_ = os.WriteFile(finishedMark(outDir, info.Path, info.SHA256), mark, 0o600)
 	return final, nil
 }
 

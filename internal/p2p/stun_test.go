@@ -105,16 +105,23 @@ func TestResolvePublicIP_Fallback(t *testing.T) {
 }
 
 func TestIsDockerAddr(t *testing.T) {
+	saved := containerBridgeIPs
+	containerBridgeIPs = func() map[string]struct{} {
+		return map[string]struct{}{
+			"172.17.0.1": {}, // docker0
+			"172.28.0.1": {}, // br-abc123
+		}
+	}
+	t.Cleanup(func() { containerBridgeIPs = saved })
+
 	cases := []struct {
 		addr string
 		want bool
 	}{
 		{"/ip4/172.17.0.1/tcp/4001", true},
 		{"/ip4/172.28.0.1/udp/5000/quic-v1", true},
-		{"/ip4/172.16.0.1/tcp/80", true},
-		{"/ip4/172.31.255.254/tcp/80", true},
-		{"/ip4/172.15.0.1/tcp/80", false}, // outside 172.16-31
-		{"/ip4/172.32.0.1/tcp/80", false}, // outside 172.16-31
+		{"/ip4/172.16.5.10/tcp/4001", false}, // corporate LAN in 172.16/12 must stay
+		{"/ip4/172.31.255.254/tcp/80", false},
 		{"/ip4/192.168.1.104/tcp/4001", false},
 		{"/ip4/10.0.0.5/tcp/4001", false},
 		{"/ip4/127.0.0.1/tcp/4001", false},
@@ -130,6 +137,22 @@ func TestIsDockerAddr(t *testing.T) {
 		got := isDockerAddr(ma)
 		if got != tc.want {
 			t.Errorf("isDockerAddr(%q) = %v, want %v", tc.addr, got, tc.want)
+		}
+	}
+
+	for name, want := range map[string]bool{
+		"docker0":    true,
+		"br-123456":  true,
+		"veth0a1b2c": true,
+		"podman0":    true,
+		"virbr0":     true,
+		"eth0":       false,
+		"wlan0":      false,
+		"en0":        false,
+		"wg0":        false,
+	} {
+		if got := isContainerInterface(name); got != want {
+			t.Errorf("isContainerInterface(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -284,6 +307,12 @@ func hasAddr(addrs []multiaddr.Multiaddr, want string) bool {
 }
 
 func TestRewrite(t *testing.T) {
+	saved := containerBridgeIPs
+	containerBridgeIPs = func() map[string]struct{} {
+		return map[string]struct{}{"172.17.0.1": {}}
+	}
+	t.Cleanup(func() { containerBridgeIPs = saved })
+
 	in := []multiaddr.Multiaddr{
 		multiaddr.StringCast("/ip4/192.168.1.104/udp/45000/quic-v1"),
 		multiaddr.StringCast("/ip4/192.168.1.104/tcp/41000"),

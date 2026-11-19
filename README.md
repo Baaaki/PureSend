@@ -140,7 +140,7 @@ puresend -receive kiraz-liman-42 -out /var/data -yes
 puresend -update
 ```
 
-Exit codes are stable for scripting: `0` success, `2` bad flags, `3` network unreachable, `4` wrong code or expired room, `5` transfer declined, `6` I/O or checksum error, `130` interrupted.
+Exit codes are stable for scripting: `0` success, `2` bad flags, `3` network unreachable, `4` wrong code or expired room, `5` I/O or checksum error, `6` transfer declined, `130` interrupted.
 
 ### Build from source
 

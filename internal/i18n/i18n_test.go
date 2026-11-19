@@ -53,6 +53,11 @@ func TestDetectOS(t *testing.T) {
 	if got := DetectOS(); got != EN {
 		t.Errorf("DetectOS() for de_DE = %v, want %v", got, EN)
 	}
+
+	os.Setenv("LANG", "en_TR.UTF-8")
+	if got := DetectOS(); got != EN {
+		t.Errorf("DetectOS() for en_TR = %v, want %v", got, EN)
+	}
 }
 
 func TestToggle(t *testing.T) {

@@ -3,7 +3,9 @@ package transfer
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"math/big"
 
 	"github.com/schollz/pake/v3"
 )
@@ -144,7 +146,10 @@ func authenticate(role int, creds Credentials, read readMsgFunc, write writeMsgF
 	if len(theirs.PAKE) == 0 {
 		return nil, ErrWrongCode
 	}
-	if err := p.Update(theirs.PAKE); err != nil {
+	if err := validatePAKEBytes(role, theirs.PAKE); err != nil {
+		return nil, ErrWrongCode
+	}
+	if err := safePAKEUpdate(p, theirs.PAKE); err != nil {
 		// A malformed or off-curve value means the other side is not
 		// running this protocol, or is not who it claims to be.
 		return nil, ErrWrongCode
@@ -233,4 +238,44 @@ func confirmTag(key []byte, label string) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(label))
 	return mac.Sum(nil)
+}
+
+// pakeWire mirrors the JSON fields schollz/pake reads during Update so they
+// can be checked for nil before entering the library. schollz/pake panics on
+// a JSON "null" payload or missing curve coordinates (nil *big.Int passed to
+// elliptic.P256().IsOnCurve).
+type pakeWire struct {
+	Role *int     `json:"Role"`
+	Xu   *big.Int `json:"Xᵤ"`
+	Xv   *big.Int `json:"Xᵥ"`
+	Yu   *big.Int `json:"Yᵤ"`
+	Yv   *big.Int `json:"Yᵥ"`
+}
+
+func validatePAKEBytes(role int, raw []byte) error {
+	var msg *pakeWire
+	if err := json.Unmarshal(raw, &msg); err != nil || msg == nil || msg.Role == nil {
+		return ErrWrongCode
+	}
+	if role == roleSender {
+		if *msg.Role != roleReceiver || msg.Xu == nil || msg.Xv == nil {
+			return ErrWrongCode
+		}
+		return nil
+	}
+	if *msg.Role != roleSender || msg.Yu == nil || msg.Yv == nil {
+		return ErrWrongCode
+	}
+	return nil
+}
+
+// safePAKEUpdate guards against any unexpected panic inside the third-party
+// PAKE library when handling untrusted wire input.
+func safePAKEUpdate(p *pake.Pake, raw []byte) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrWrongCode
+		}
+	}()
+	return p.Update(raw)
 }

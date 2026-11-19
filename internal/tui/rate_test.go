@@ -67,6 +67,22 @@ func TestRateMeterSaysNothingTooEarly(t *testing.T) {
 	}
 }
 
+// TestRateMeterWarmupBeforeFirstSample ensures short transfers between 200ms
+// and sampleInterval (400ms) report a non-zero average rate instead of 0.
+func TestRateMeterWarmupBeforeFirstSample(t *testing.T) {
+	var r rateMeter
+	const mb = 1 << 20
+	r.reset(0)
+	r.startedAt = time.Now().Add(-300 * time.Millisecond)
+	r.sampledAt = r.startedAt
+	r.observe(3 * mb)
+
+	got := r.rate()
+	if got <= 0 {
+		t.Fatalf("warmup rate = %v, want positive rate", got)
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	for d, want := range map[time.Duration]string{
 		3 * time.Second:                 "birkaç saniye",

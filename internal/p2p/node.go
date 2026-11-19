@@ -49,10 +49,11 @@ const (
 	progressInterval = 80 * time.Millisecond
 
 	// handshakeSlots is how many receivers a sender will be proving the
-	// code to at once. Only one of them can ever get the files, so this
-	// only needs to be enough that a stranger dawdling in a handshake
-	// cannot keep the real friend from starting theirs.
-	handshakeSlots = 4
+	// code to at once, and maxHandshakesPerPeer bounds how many of those
+	// slots a single peer may hold so one silent peer cannot starve the
+	// real receiver.
+	handshakeSlots       = 16
+	maxHandshakesPerPeer = 4
 
 	// connectBudget is how long reaching a meeting point may take in all.
 	connectBudget = 30 * time.Second
@@ -70,6 +71,9 @@ const (
 	// against the list before dialling.
 	MaxWrongCodes = 3
 )
+
+// roomTTL mirrors rendezvous.RoomTTL and is a var only so tests can shorten it.
+var roomTTL = rendezvous.RoomTTL
 
 // ErrRoomExpired ends a room that could not be put back in time.
 var ErrRoomExpired = errors.New("the room code expired")
@@ -205,8 +209,10 @@ type Node struct {
 	// claimed guards the one-transfer-per-room rule: it is set when a
 	// receiver that proved the code takes the room, and cleared again if
 	// that attempt fails.
-	claimed    atomic.Bool
-	handshakes chan struct{}
+	claimed        atomic.Bool
+	handshakes     chan struct{}
+	handshakeMu    sync.Mutex
+	peerHandshakes map[peer.ID]int
 
 	// lost is signalled when the connection to the meeting point drops.
 	lost chan struct{}
@@ -579,8 +585,9 @@ func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
 		}
 	}
 
+	dockerIPs := containerBridgeIPs()
 	for _, a := range n.host.Addrs() {
-		if isDockerAddr(a) {
+		if isDockerAddrIn(a, dockerIPs) {
 			continue
 		}
 		switch {
@@ -623,6 +630,38 @@ func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
 	return nameplate, nil
 }
 
+// tryAcquireHandshake claims one global and one per-peer handshake slot.
+func (n *Node) tryAcquireHandshake(p peer.ID) bool {
+	n.handshakeMu.Lock()
+	if n.peerHandshakes == nil {
+		n.peerHandshakes = make(map[peer.ID]int)
+	}
+	if n.peerHandshakes[p] >= maxHandshakesPerPeer {
+		n.handshakeMu.Unlock()
+		return false
+	}
+	select {
+	case n.handshakes <- struct{}{}:
+		n.peerHandshakes[p]++
+		n.handshakeMu.Unlock()
+		return true
+	default:
+		n.handshakeMu.Unlock()
+		return false
+	}
+}
+
+func (n *Node) releaseHandshake(p peer.ID) {
+	n.handshakeMu.Lock()
+	if n.peerHandshakes[p] <= 1 {
+		delete(n.peerHandshakes, p)
+	} else {
+		n.peerHandshakes[p]--
+	}
+	n.handshakeMu.Unlock()
+	<-n.handshakes
+}
+
 // serve is the transfer protocol handler for a room.
 func (n *Node) serve(room string, offer *transfer.Offer) network.StreamHandler {
 	// Wrong codes are counted per room, across every handshake it sees, and
@@ -634,11 +673,16 @@ func (n *Node) serve(room string, offer *transfer.Offer) network.StreamHandler {
 		wrongCodes int
 	)
 	return func(s network.Stream) {
+		defer func() {
+			if recover() != nil {
+				_ = s.Reset()
+			}
+		}()
+
+		remotePeer := s.Conn().RemotePeer()
 		// A handshake is cheap to start and anyone who knows our address
-		// can start one; only so many run at a time.
-		select {
-		case n.handshakes <- struct{}{}:
-		default:
+		// can start one; cap both total and per-peer concurrency.
+		if !n.tryAcquireHandshake(remotePeer) {
 			_ = s.Reset()
 			return
 		}
@@ -646,18 +690,15 @@ func (n *Node) serve(room string, offer *transfer.Offer) network.StreamHandler {
 		release := func() {
 			if held {
 				held = false
-				<-n.handshakes
+				n.releaseHandshake(remotePeer)
 			}
 		}
 		defer release()
 
-		remotePeer := s.Conn().RemotePeer()
 		claimed := false
 		// left is how many more wrong codes the room survives once this
 		// handshake's has been counted; -1 while none of its has been.
 		left := -1
-		transferCtx, cancelTransfer := context.WithCancel(context.Background())
-		defer cancelTransfer()
 
 		err := transfer.Send(s, offer, transfer.Credentials{
 			Code:     room,
@@ -689,11 +730,9 @@ func (n *Node) serve(room string, offer *transfer.Offer) network.StreamHandler {
 					return false
 				}
 				claimed = true
-				direct := !s.Conn().Stat().Limited || n.isDirect(remotePeer)
-				n.emit(ConnectedEvent{Direct: direct})
-				if !direct {
-					go n.watchDirectUpgrade(transferCtx, remotePeer)
-				}
+				// Report whether *this* stream actually bypasses the relay:
+				// a libp2p stream stays on the connection it was opened on.
+				n.emit(ConnectedEvent{Direct: !s.Conn().Stat().Limited})
 				return true
 			},
 		})
@@ -757,9 +796,30 @@ func (n *Node) watchOffer(offer *transfer.Offer) {
 // connection, and without this the sender would sit on "waiting" forever
 // while its friend is told the code does not exist.
 func (n *Node) keepRoom() {
+	n.mu.Lock()
+	hostedAt := n.hostedAt
+	n.mu.Unlock()
+	remaining := time.Until(hostedAt.Add(roomTTL))
+	if remaining <= 0 {
+		remaining = time.Nanosecond
+	}
+	expiry := time.NewTimer(remaining)
+	defer expiry.Stop()
+
 	for {
 		select {
 		case <-n.done:
+			return
+		case <-expiry.C:
+			if n.ctx.Err() != nil || n.currentRoom() == "" {
+				return
+			}
+			if n.claimed.Load() {
+				// Let an in-flight transfer finish; re-check if it falls back to waiting.
+				expiry.Reset(time.Second)
+				continue
+			}
+			n.abandonRoom(errRoomExpired)
 			return
 		case <-n.lost:
 		}
@@ -794,7 +854,7 @@ func (n *Node) restore() error {
 		if room == "" {
 			return nil // closed meanwhile; nothing to put back
 		}
-		if time.Since(hostedAt) >= rendezvous.RoomTTL {
+		if time.Since(hostedAt) >= roomTTL {
 			return errRoomExpired
 		}
 
@@ -951,10 +1011,6 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	// tries to replace it with a direct one in the background.
 	n.emit(StatusEvent{Text: StatusDirect})
 	direct := n.waitForDirect(ctx, sender.ID, directWait)
-	n.emit(ConnectedEvent{Direct: direct, RelayLimit: relayLimit})
-	if !direct {
-		go n.watchDirectUpgrade(ctx, sender.ID)
-	}
 
 	streamCtx := ctx
 	if !direct {
@@ -966,6 +1022,11 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	if err != nil {
 		return nil, fmt.Errorf("could not start the transfer: %w", err)
 	}
+	// Report the connection actually carrying this stream: a libp2p stream
+	// stays bound to the connection it was opened on and does not migrate if
+	// a direct connection opens later.
+	direct = !s.Conn().Stat().Limited
+	n.emit(ConnectedEvent{Direct: direct, RelayLimit: relayLimit})
 
 	confirm := func(m transfer.Manifest) bool {
 		reply := make(chan bool, 1)
@@ -1027,27 +1088,6 @@ func (n *Node) isDirect(p peer.ID) bool {
 		}
 	}
 	return false
-}
-
-// watchDirectUpgrade polls in the background while a transfer is running.
-// If DCUtR or a direct route succeeds after initial connection, it emits
-// a ConnectedEvent{Direct: true} so the UI dynamically upgrades to direct P2P.
-func (n *Node) watchDirectUpgrade(ctx context.Context, p peer.ID) {
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			if n.isDirect(p) {
-				n.emit(ConnectedEvent{Direct: true})
-				return
-			}
-		case <-ctx.Done():
-			return
-		case <-n.done:
-			return
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
