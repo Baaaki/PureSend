@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -298,7 +299,7 @@ func TestKeepRoomExpiresWithoutDisconnect(t *testing.T) {
 	select {
 	case ev := <-n.Events():
 		lost, ok := ev.(RoomLostEvent)
-		if !ok || lost.Err != ErrRoomExpired {
+		if !ok || !errors.Is(lost.Err, ErrRoomExpired) {
 			t.Fatalf("got event %#v, want RoomLostEvent{Err: ErrRoomExpired}", ev)
 		}
 	case <-time.After(2 * time.Second):
