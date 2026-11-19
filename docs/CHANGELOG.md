@@ -6,6 +6,83 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.10] - 2026-11-19
+
+### Security
+
+- **PAKE remote nil-pointer crash mitigation.** Validated incoming PAKE wire
+  payloads (`Role` and curve coordinates) before passing them to `schollz/pake`
+  and guarded `p.Update` / stream handlers with defensive `recover()`, preventing
+  unauthenticated peers from crashing a waiting sender or receiver with `"null"`
+  or `"{}"` handshake messages.
+- **Empty compressed chunk DoS protection.** Rejected 0-byte decompressed chunks
+  in `receiveFile` so a malicious sender cannot spin the receiver indefinitely
+  while resetting the idle deadline.
+- **Per-peer handshake concurrency cap.** Raised the sender's global handshake
+  pool to 16 slots and capped each remote peer to 4 concurrent handshakes so a
+  single peer holding silent streams cannot starve legitimate receivers.
+- **Removed global lookup kill switch.** Dropped `maxGlobalMissesHard` so a
+  miss flood cannot lock out legitimate users' first lookup, restoring the
+  documented guarantee while keeping per-peer pressure throttling and the
+  `maxLookupPeers` memory cap (now also enforced for abandoned rooms in
+  `retired`).
+- **Leaf symlink protection during resume verification.** Switched `haveAlready`
+  and partial file stat checks from `os.Stat` to `os.Lstat` so leaf symbolic
+  links inside the destination folder are never followed.
+- **Nested hidden-file warnings in TUI.** The TUI confirmation screen now flags
+  hidden files and folders nested inside directories (e.g. `project/.git/`),
+  matching headless mode.
+- **HTTPS enforcement for self-updates.** `internal/update` now rejects plain
+  `http://` asset URLs and HTTPS-to-HTTP downgrade redirects.
+
+### Fixed
+
+- **Silent missing files on resume with identical file contents.** Keyed `.done`
+  completion markers by `(path, sha256)` instead of digest alone so resuming an
+  interrupted folder transfer with duplicate or empty files (such as multiple
+  `__init__.py` files) never skips later copies.
+- **Accurate connection type reporting and receiver goroutine leak.** Removed
+  `watchDirectUpgrade` (libp2p streams remain bound to the connection they were
+  opened on and do not migrate off a relay), fixing both misleading UI upgrades
+  and a leaked receiver polling goroutine.
+- **Resume-aware disk space pre-check.** `Receive` now subtracts bytes already
+  present in `.puresend-partial` and finished files before checking free space.
+- **Manifest size limit alignment.** Raised `maxManifestBytes` to 4 MiB so valid
+  5000-file transfers with deeply nested paths do not exceed the wire cap.
+- **Sender-side room expiration timer.** `keepRoom` now expires an idle room
+  locally after `RoomTTL` even when the server connection never drops.
+- **Symlinked top-level folder collection and manifest re-hash heartbeats.**
+  `Collect` now resolves a top-level directory symlink before walking (while
+  still skipping nested symlinks), `digest` verifies read byte counts against
+  declared file size, and re-hashing modified files sends heartbeats so
+  receivers do not time out.
+- **Docker bridge filtering without blocking `172.16.0.0/12` LAN/VPNs.**
+  `isDockerAddr` now checks local container/bridge interface names (`docker*`,
+  `br-*`, `veth*`, `podman*`, `virbr*`, etc.) instead of dropping all of
+  `172.16.0.0/12`.
+- **TUI rate meter warmup and `RoomLostEvent` handling.** Fixed the 200–400 ms
+  warmup speed fallback in `rateMeter`, and cleared `m.room` on `RoomLostEvent`
+  so a trailing failed `DoneEvent` cannot bounce the user back to a dead code.
+- **Self-updater edge cases.** Skipped directory entries in `.zip` archives,
+  handled SemVer pre-release ordering (`v2.1.0 > v2.1.0-rc.1`), and switched
+  `FindAsset` to token-boundary matching so `arm` never matches `arm64`.
+- **CLI exit code documentation mismatch.** Aligned `README.md` and
+  `README_TR.md` exit codes `5` (I/O or checksum error) and `6` (transfer
+  declined) with `cmd/client/main.go`.
+
+### Changed
+
+- **Repeatable `-send` flag and comma-safe filenames.** `-send` can now be
+  repeated and preserves existing literal filenames containing commas while
+  remaining backwards-compatible with comma-separated lists.
+- **Locale detection and English example codes.** `i18n.DetectOS` now checks the
+  primary language tag (`tr`) instead of substring matching (so `en_TR` stays
+  English), restricts `defaults` lookup to macOS, and uses valid Turkish example
+  code `kiraz-liman-42` in English prompts.
+- **Server `/health` and `/metrics` polish.** Encoded `/health` with
+  `encoding/json` and replaced 10 separate metric callbacks with a single
+  `prometheus.Collector` that snapshots `Registry.Stats()` once per scrape.
+
 ## [2.0.9] - 2026-11-03
 
 ### Added
