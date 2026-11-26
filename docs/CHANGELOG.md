@@ -6,6 +6,83 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.0.11] - 2026-11-26
+
+### Security
+
+- **Embedded default minisign public key across all builds.** Extracted a
+  shared `internal/minisign` verifier and defaulted `internal/update.publicKey`
+  (as well as `Makefile` and `.goreleaser.yaml`) to the official release
+  signing key, ensuring source builds also enforce signature verification on
+  `puresend -update`.
+- **HTTPS enforcement and optional minisign verification for `server.txt`.**
+  `internal/p2p` now rejects plain `http://` remote server-list URLs and
+  HTTPS-to-HTTP downgrade redirects, and verifies `<url>.minisig` when
+  `serverListPublicKey` is configured.
+- **Opt-out for startup update checks.** Added `-no-update-check`,
+  `FT_NO_UPDATE_CHECK=1`, and `DO_NOT_TRACK=1` support in the TUI, and disabled
+  automatic GitHub release queries on `dev` builds.
+- **Upgraded `github.com/gorilla/websocket`.** Resolved `GO-2026-6278` reported
+  by `govulncheck`.
+- **Hardened `release.yml`, `Dockerfile`, and `install.ps1`.** Added `gofmt`,
+  `golangci-lint`, `govulncheck`, and full non-short `-race` tests to the
+  release workflow; moved user creation and `/data` ownership before
+  `VOLUME /data` in `Dockerfile`; hardened user `Path` updates in `install.ps1`
+  against empty-PATH leading semicolons and substring false positives.
+
+### Added
+
+- **One-key room code copy (`[c]`) in the TUI.** Pressing `c` on the waiting
+  screen copies the active room code to the clipboard via OSC 52 with visual
+  confirmation.
+- **`[Esc]` session cancellation on waiting, connecting, and finding screens.**
+  Users can now cancel an in-flight connection, lookup, or hosted room and
+  return directly to the main menu without quitting the app.
+- **Hidden file and folder toggle (`[.]`) in TUI pickers.** Pressing `.` in the
+  file picker or download-directory picker toggles visibility of dot-entries.
+- **Multi-server lookup failover and `server.txt` recovery while hosting.**
+  Receivers now query remaining configured or listed meeting points when the
+  primary returns `ErrRoomNotFound`, and waiting senders consult `server.txt`
+  during `restore()` if all built-in addresses stop answering.
+- **Modern Linux desktop terminals and headless non-TTY guidance.** Added
+  `ptyxis` and `kgx` (GNOME Console) to `maybeSpawnTerminal`, cleaned up
+  leftover `.old` executables after Windows updates, and added a `-yes` hint
+  when headless `-receive` encounters closed `stdin`.
+
+### Fixed
+
+- **DCUtR hole-punch watcher race during `Connect`.** Armed `punchWatcher`
+  before `host.Connect` so an immediate `ProtocolErrorEvt` or early failed
+  attempt is never missed, avoiding unnecessary 30-second fallback waits.
+- **Progress event flooding across many small files.** Throttled progress
+  callbacks against overall transfer completion (`Index == Files`) rather than
+  single-file completion so transfers of thousands of small files neither flood
+  the event buffer nor drop the final 100% update.
+- **Manifest file-vs-folder conflict pre-check.** `checkManifest` now rejects
+  manifests with colliding file and directory paths (e.g. `report` and
+  `report/detail.pdf`) and detects existing regular files blocking target
+  subdirectories before user approval.
+- **TUI folder picker (`[f]`) false rejections and silent failures.** Allowed
+  selecting legitimate subfolders under hidden home directories (such as
+  `~/.local/share/...`), enforced `MaxFiles` eagerly with localized warnings,
+  and capped displayed selections on `screenPickFiles` so standard 24-row
+  terminals do not overflow.
+- **Sender-side retry error visibility.** Waiting senders now see the localized
+  reason a previous attempt ended (e.g. receiver declined or out of disk space)
+  alongside the retry notice.
+- **Cooldown for recently retired room nameplates.** `freeNameplate` briefly
+  rests recently unregistered room numbers so straggling receivers do not
+  collide with new rooms and spend their wrong-code attempts.
+
+### Changed
+
+- **Adaptive Huffman compression skip and 64 KB stream buffers.** `sendFile`
+  now skips `flate.HuffmanOnly` in 512 KB runs after 8 consecutive
+  incompressible chunks (probing periodically to resume compression on mixed
+  archives), aligned stream `bufio` buffers to 64 KB, reused read/digest
+  buffers across multi-file transfers, and refreshed rendezvous room addresses
+  automatically when STUN detects an external NAT port change.
+
 ## [2.0.10] - 2026-11-19
 
 ### Security
