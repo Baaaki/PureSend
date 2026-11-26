@@ -245,6 +245,20 @@ Tehdit modelinin tamamı, nelerin korunduğu ve nelerin korunmadığı: [SECURIT
 
 ---
 
+<a id="code-signing-policy"></a>
+## 🔐 Kod İmzalama ve Gizlilik Politikası (Code Signing Policy)
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/). *(Ücretsiz kod imzalama [SignPath.io](https://signpath.io/) tarafından sağlanmakta olup sertifika [SignPath Foundation](https://signpath.org/) tarafından verilmiştir.)*
+
+* **Roller (Committers, Reviewers ve Approvers):** [@Baaaki](https://github.com/Baaaki) (proje geliştiricisi ve sürüm sorumlusu; dış katkılar birleştirilmeden ve imzalanmadan önce `@Baaaki` tarafından incelenir ve onaylanır).
+* **Derleme Kaynağı:** Resmî Windows ikili dosyaları (`puresend.exe`), doğrudan bu açık kaynak depodan GitHub Actions sunucularında el değmeden derlenir; geliştirici bilgisayarında elle derlenip imzalanmaz.
+* **Ağ ve Gizlilik Şeffaflığı:** Bu yazılım, kullanıcı veya yazılımı kuran/işleten kişi açıkça talep etmedikçe başka hiçbir ağ sistemine bilgi aktarmaz:
+  * **Telemetri yoktur:** PureSend hiçbir telemetri, analitik, çökme raporu veya kullanım verisi toplamaz.
+  * **Aktarım bağlantıları:** Buluşma/röle sunucusuna (`rendezvous.madebybaki.com`, yedek liste `https://puresend.madebybaki.com/server.txt` veya kullanıcının verdiği `-server` / `FT_SERVER` adresi), STUN sunucularına ve karşı eşe yalnızca kullanıcı bir dosya gönderme veya alma işlemi başlattığında bağlanılır.
+  * **Güncelleme kontrolü ve kapatma:** Sürüm ikili dosyalarında etkileşimli TUI açıldığında yeni sürüm kontrolü için GitHub Releases (`api.github.com`) sorgulanır; `puresend -update` ise yalnızca elle çalıştırıldığında doğrulanmış sürüm arşivini indirir. Açılıştaki otomatik sürüm kontrolü `-no-update-check`, `FT_NO_UPDATE_CHECK=1` veya `DO_NOT_TRACK=1` ile tamamen kapatılabilir.
+
+---
+
 ## 📄 Lisans & İletişim
 
 Bu proje [GNU General Public License v3.0](LICENSE) ile lisanslanmıştır.

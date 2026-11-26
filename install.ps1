@@ -103,6 +103,10 @@ Write-Host "==> Dosyalar cikariliyor..." -ForegroundColor Cyan
 Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 Remove-Item -Path $zipPath -Force
 
+# Clear Mark-of-the-Web (Zone.Identifier) now that SHA-256 (and minisign,
+# when installed) verification has succeeded.
+Unblock-File -Path (Join-Path $installDir $binary) -ErrorAction SilentlyContinue
+
 # Add to user PATH if not already present (avoiding leading semicolons on
 # empty PATH and false-positive substring matches).
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")

@@ -245,6 +245,20 @@ Full threat model, what is and is not protected: [SECURITY.md](.github/SECURITY.
 
 ---
 
+<a id="code-signing-policy"></a>
+## 🔐 Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+* **Committers, Reviewers, and Approvers:** [@Baaaki](https://github.com/Baaaki) (project author and sole release maintainer; external pull requests are reviewed and approved by `@Baaaki` before merging and signing).
+* **Build Provenance:** Official Windows executables (`puresend.exe`) are built reproducibly from this public repository on GitHub-hosted Actions runners and are never built or signed on local developer machines.
+* **Privacy & Network Transparency:** This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it:
+  * **No telemetry:** PureSend collects zero telemetry, analytics, crash reports, or usage tracking.
+  * **Transfer connections:** Connections to the meeting-point server (`rendezvous.madebybaki.com`, fallback address list at `https://puresend.madebybaki.com/server.txt`, or a user-supplied `-server` / `FT_SERVER` address), STUN servers, and the remote peer are made **only** during an active user-initiated send or receive session.
+  * **Update checks & opt-out:** Opening the interactive TUI on release builds checks GitHub Releases (`api.github.com`) for a newer version, and `puresend -update` downloads verified release assets when explicitly run. Automatic startup update checks can be disabled via `-no-update-check`, `FT_NO_UPDATE_CHECK=1`, or `DO_NOT_TRACK=1`.
+
+---
+
 ## 📄 License & Contact
 
 Distributed under the [GNU General Public License v3.0](LICENSE).

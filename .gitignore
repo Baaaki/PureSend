@@ -16,3 +16,6 @@
 # Test output
 coverage.out
 /.cover/
+
+# Generated Windows PE resources (rebuilt from cmd/client/winres/winres.json)
+cmd/client/*.syso

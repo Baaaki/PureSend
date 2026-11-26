@@ -20,6 +20,7 @@ GO ?= go
 # the versions CI uses.
 GOLANGCI_LINT_VERSION ?= v2.15.0
 GOVULNCHECK_VERSION   ?= v1.8.0
+GO_WINRES_VERSION     ?= v0.3.3
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -28,7 +29,14 @@ FT_SERVER ?=
 FT_SERVER_LIST ?=
 FT_UPDATE_KEY ?= RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts
 
-LDFLAGS := -s -w \
+TARGET_GOOS   := $(shell $(GO) env GOOS)
+TARGET_GOARCH := $(shell $(GO) env GOARCH)
+# Keep symbol and DWARF tables on Windows so Microsoft Defender ML heuristics
+# do not flag stripped Go PE executables as packed malware.
+STRIP_FLAGS   := $(if $(filter windows,$(TARGET_GOOS)),,-s -w)
+GO_WINRES      = $(shell command -v go-winres 2>/dev/null || command -v "$$($(GO) env GOPATH)/bin/go-winres" 2>/dev/null || echo "$(GO) run github.com/tc-hib/go-winres@$(GO_WINRES_VERSION)")
+
+LDFLAGS := $(STRIP_FLAGS) \
 	-X main.version=$(VERSION) \
 	-X main.commit=$(COMMIT) \
 	-X main.date=$(DATE)
@@ -49,8 +57,15 @@ help:
 ## build: build the client and the server into ./bin
 build: $(BIN)/puresend $(BIN)/puresend-server
 
+## winres: generate Windows PE resources (.syso) for cmd/client
+winres:
+	$(GO_WINRES) make --in cmd/client/winres/winres.json --out cmd/client/rsrc \
+		--arch $(if $(filter windows,$(TARGET_GOOS)),$(TARGET_GOARCH),amd64) \
+		--product-version=git-tag --file-version=git-tag
+
 $(BIN)/puresend: $(shell find . -name '*.go')
 	@mkdir -p $(BIN)
+	@if [ "$(TARGET_GOOS)" = "windows" ]; then $(MAKE) --no-print-directory winres; fi
 	$(GO) build -trimpath -ldflags "$(CLIENT_LDFLAGS)" -o $@ ./cmd/client
 
 $(BIN)/puresend-server: $(shell find . -name '*.go')
@@ -140,7 +155,7 @@ deb:
 
 ## clean: remove build output
 clean:
-	rm -rf $(BIN) coverage.out
+	rm -rf $(BIN) coverage.out cmd/client/*.syso
 
-.PHONY: help build test test-short test-relay test-holepunch cover bench bench-e2e vet lint vuln fmt tidy dev docker deb clean
+.PHONY: help build winres test test-short test-relay test-holepunch cover bench bench-e2e vet lint vuln fmt tidy dev docker deb clean
 

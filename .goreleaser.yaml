@@ -7,6 +7,7 @@ project_name: puresend
 before:
   hooks:
     - go mod tidy
+    - go run github.com/tc-hib/go-winres@v0.3.3 make --in cmd/client/winres/winres.json --out cmd/client/rsrc --arch amd64 --product-version=git-tag --file-version=git-tag
 
 builds:
   - id: client
@@ -25,9 +26,10 @@ builds:
         goarch: arm64
     flags:
       - -trimpath
+    # Keep symbol and DWARF tables on Windows so Microsoft Defender ML
+    # heuristics do not mistake a stripped Go PE binary for packed malware.
     ldflags:
-      - -s -w
-      - -X main.defaultServer={{ .Env.FT_SERVER }}
+      - '{{ if ne .Os "windows" }}-s -w {{ end }}-X main.defaultServer={{ .Env.FT_SERVER }}'
       - -X main.defaultServerList={{ envOrDefault "FT_SERVER_LIST" "https://puresend.madebybaki.com/server.txt" }}
       # The minisign public key `puresend -update` checks releases against.
       - -X puresend/internal/update.publicKey={{ envOrDefault "FT_UPDATE_KEY" "RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts" }}

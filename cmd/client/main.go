@@ -18,6 +18,8 @@
 //
 //	puresend -send holiday.zip        # prints a room code
 //	puresend -receive kiraz-liman-42  # downloads into -out
+//
+//go:generate go run github.com/tc-hib/go-winres@v0.3.3 make --in winres/winres.json --out rsrc --arch amd64 --product-version=git-tag --file-version=git-tag
 package main
 
 import (
