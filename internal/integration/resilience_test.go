@@ -214,3 +214,53 @@ func TestSecondReceiverIsToldTheRoomIsBusy(t *testing.T) {
 		t.Fatalf("send failed: %v", d.Err)
 	}
 }
+
+// TestLookupFallsBackToBackupServer verifies that when a sender hosts on a
+// secondary server while the primary server is also reachable, a receiver
+// configured with both servers falls back past ErrRoomNotFound on the primary
+// and completes the transfer through the secondary.
+func TestLookupFallsBackToBackupServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	_, _, primaryAddr := newWSServer(t)
+	_, _, backupAddr := newWSServer(t)
+
+	// Sender hosts on backupAddr (simulating failover while primary had blipped).
+	sender, err := p2p.New(ctx, []string{backupAddr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	sendDone := drain(t, sender)
+
+	want := []byte("yedek sunucu üzerinden bulundu")
+	src := filepath.Join(t.TempDir(), "yedek.txt")
+	if err := os.WriteFile(src, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	room, err := sender.Host(ctx, []string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Receiver dials primaryAddr first, sees not_found there, and checks backupAddr.
+	receiver, err := p2p.New(ctx, []string{primaryAddr, backupAddr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer receiver.Close()
+	outDir := t.TempDir()
+	recvDone := drain(t, receiver)
+	go receiver.Fetch(ctx, room, outDir)
+
+	if d := <-recvDone; d.Err != nil {
+		t.Fatalf("receiver did not find room on backup server: %v", d.Err)
+	}
+	if d := <-sendDone; d.Err != nil {
+		t.Fatalf("sender failed: %v", d.Err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(outDir, "yedek.txt")); !bytes.Equal(got, want) {
+		t.Error("received payload does not match sent payload")
+	}
+}

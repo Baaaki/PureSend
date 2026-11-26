@@ -1062,3 +1062,136 @@ func TestConfirmWarnsAboutNestedHiddenEntries(t *testing.T) {
 		t.Errorf("confirm screen did not warn about nested hidden folder:\n%s", view)
 	}
 }
+
+func TestWaitingCopyAndEsc(t *testing.T) {
+	m := New(Config{Servers: []string{"x"}})
+	m.mode = modeSend
+	m.screen = screenWaiting
+	m.room = "kiraz-liman-42"
+
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Text: "c"})
+	copied := next.(Model)
+	if !copied.copied || cmd == nil {
+		t.Fatalf("pressing 'c' on waiting screen: copied=%v cmd=%v, want true and clipboard cmd", copied.copied, cmd)
+	}
+	if !strings.Contains(copied.render(), "panoya kopyalandı") {
+		t.Errorf("waiting screen missing copied notice:\n%s", copied.render())
+	}
+
+	cancelled := press(t, copied, "esc")
+	if cancelled.screen != screenWelcome || cancelled.room != "" || cancelled.copied {
+		t.Errorf("esc on waiting screen: screen=%v room=%q copied=%v", cancelled.screen, cancelled.room, cancelled.copied)
+	}
+}
+
+func TestFindingAndConnectingEscCancel(t *testing.T) {
+	for _, sc := range []screen{screenConnecting, screenFinding} {
+		m := New(Config{Servers: []string{"x"}})
+		m.mode = modeReceive
+		m.screen = sc
+
+		cancelled := press(t, m, "esc")
+		if cancelled.screen != screenWelcome || cancelled.mode != modeNone {
+			t.Fatalf("esc on %v: got screen=%v mode=%v, want welcome/none", sc, cancelled.screen, cancelled.mode)
+		}
+		// Late async errors or room messages from the cancelled session are ignored.
+		afterErr, _ := cancelled.Update(errMsg{err: fmt.Errorf("canceled")})
+		if afterErr.(Model).screen != screenWelcome {
+			t.Errorf("late errMsg moved screen from welcome to %v", afterErr.(Model).screen)
+		}
+		afterRoom, _ := cancelled.Update(roomReadyMsg{room: "kiraz-liman-42"})
+		if afterRoom.(Model).screen != screenWelcome {
+			t.Errorf("late roomReadyMsg moved screen from welcome to %v", afterRoom.(Model).screen)
+		}
+	}
+}
+
+func TestSenderSeesFailureReasonOnRetry(t *testing.T) {
+	m := New(Config{Servers: []string{"x"}, Lang: "tr"})
+	m.mode = modeSend
+	m.screen = screenWaiting
+	m.room = "kiraz-liman-42"
+
+	m = event(t, m, p2p.DoneEvent{Err: transfer.ErrTransferDeclined})
+	if m.screen != screenWaiting {
+		t.Fatalf("screen = %v, want screenWaiting", m.screen)
+	}
+	trView := m.render()
+	if !strings.Contains(trView, "kabul etmedi") {
+		t.Errorf("sender retry screen did not show decline reason in TR:\n%s", trView)
+	}
+
+	enModel := press(t, m, "l")
+	enView := enModel.render()
+	if !strings.Contains(enView, "Transfer declined by receiver.") {
+		t.Errorf("sender retry screen did not switch decline reason to EN:\n%s", enView)
+	}
+}
+
+func TestPickFilesFeedbackTruncationAndHiddenToggle(t *testing.T) {
+	emptyDir := t.TempDir()
+	m := New(Config{Servers: []string{"x"}, Lang: "tr"})
+	m.screen = screenPickFiles
+	m.picker.CurrentDirectory = emptyDir
+
+	m = press(t, m, "f")
+	if m.pickErr == "" || !strings.Contains(m.render(), "normal dosya yok") {
+		t.Errorf("expected empty-folder warning on [f], got pickErr=%q", m.pickErr)
+	}
+
+	// Hidden file toggle [.] flips ShowHidden and clears pickErr.
+	m = press(t, m, ".")
+	if !m.picker.ShowHidden || m.pickErr != "" {
+		t.Errorf("after [.]: ShowHidden=%v pickErr=%q, want true and empty", m.picker.ShowHidden, m.pickErr)
+	}
+
+	// Legitimate subfolder inside a dot-directory (e.g. ~/.local/share/app) is allowed.
+	dotParent := filepath.Join(t.TempDir(), ".local", "share", "app")
+	if err := os.MkdirAll(dotParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotParent, "save.dat"), []byte("1234"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.picker.CurrentDirectory = dotParent
+	m = press(t, m, "f")
+	if len(m.picked) != 1 || m.pickErr != "" {
+		t.Errorf("subfolder inside dot-dir rejected: picked=%+v pickErr=%q", m.picked, m.pickErr)
+	}
+
+	// Picking >5 files summarizes earlier ones while preserving total size.
+	m.picked = nil
+	for i := range 8 {
+		m.picked = append(m.picked, pickedFile{
+			path: fmt.Sprintf("/tmp/f%d.bin", i),
+			name: fmt.Sprintf("f%d.bin", i),
+			size: 1024,
+		})
+	}
+	view := ansi.Strip(m.render())
+	if !strings.Contains(view, "ve 3 seçim daha") || !strings.Contains(view, "8.0 KB") {
+		t.Errorf("picked list truncation or total wrong:\n%s", view)
+	}
+}
+
+func TestUpdateCheckSkippedForDevAndOptOut(t *testing.T) {
+	if New(Config{Version: "dev"}).shouldCheckUpdate() {
+		t.Error("dev build should not auto-check GitHub for updates")
+	}
+	if New(Config{Version: "v2.0.10", NoUpdateCheck: true}).shouldCheckUpdate() {
+		t.Error("NoUpdateCheck=true should disable update check")
+	}
+	t.Setenv("FT_NO_UPDATE_CHECK", "1")
+	if New(Config{Version: "v2.0.10"}).shouldCheckUpdate() {
+		t.Error("FT_NO_UPDATE_CHECK=1 should disable update check")
+	}
+	t.Setenv("FT_NO_UPDATE_CHECK", "")
+	t.Setenv("DO_NOT_TRACK", "1")
+	if New(Config{Version: "v2.0.10"}).shouldCheckUpdate() {
+		t.Error("DO_NOT_TRACK=1 should disable update check")
+	}
+	t.Setenv("DO_NOT_TRACK", "")
+	if !New(Config{Version: "v2.0.10"}).shouldCheckUpdate() {
+		t.Error("release build with default env should check for updates")
+	}
+}

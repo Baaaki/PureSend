@@ -109,19 +109,34 @@ func (m Model) viewPickFiles() string {
 	b.WriteString(m.st.help.Render(t.PickHelp2) + "\n")
 	b.WriteString(m.st.help.Render(t.PickHelp3) + "\n\n")
 	b.WriteString(m.picker.View() + "\n")
+	if m.pickErr != "" {
+		b.WriteString(m.st.warn.Render("! "+m.pickErr) + "\n\n")
+	}
 
 	if len(m.picked) > 0 {
 		var total int64
-		b.WriteString(m.st.ok.Render(t.PickSelected(len(m.picked))) + "\n")
 		for _, f := range m.picked {
+			total += f.size
+		}
+		b.WriteString(m.st.ok.Render(t.PickSelected(len(m.picked))) + "\n")
+		const maxShown = 5
+		start := 0
+		if len(m.picked) > maxShown {
+			start = len(m.picked) - maxShown
+			b.WriteString(m.st.help.Render(t.PickMoreSelected(start)) + "\n")
+		}
+		for _, f := range m.picked[start:] {
 			label := "• " + f.name
 			detail := formatBytes(f.size)
 			if f.isDir {
 				label = "• 📁 " + f.name
-				detail = t.PickFolderFiles(f.files, formatBytes(f.size))
+				if f.approx {
+					detail = t.PickFolderApprox(f.files, formatBytes(f.size))
+				} else {
+					detail = t.PickFolderFiles(f.files, formatBytes(f.size))
+				}
 			}
 			b.WriteString(m.st.file.Render(label) + " " + m.st.size.Render("("+detail+")") + "\n")
-			total += f.size
 		}
 		b.WriteString(m.st.size.Render(t.PickTotal(formatBytes(total))) + "\n\n")
 		b.WriteString(m.st.buttonSel.Render(t.PickStartBtn) + "\n\n")
@@ -157,9 +172,17 @@ func (m Model) viewWaiting() string {
 	b.WriteString(m.st.title.Render(t.WaitingTitle) + "\n\n")
 	b.WriteString(m.spinner() + " " + m.st.body.Render(t.WaitingStatus) + "\n\n")
 	if m.retrying {
+		if m.retryErr != nil {
+			headline, _ := i18n.Explain(m.retryErr, m.lang)
+			b.WriteString(m.st.warn.Render("! "+headline) + "\n")
+		}
 		b.WriteString(m.st.warn.Render("! "+t.HostRetry) + "\n\n")
 	}
-	b.WriteString(m.st.code.Render(m.room) + "\n\n")
+	b.WriteString(m.st.code.Render(m.room) + "\n")
+	if m.copied {
+		b.WriteString(m.st.ok.Render("  "+t.WaitingCopied) + "\n")
+	}
+	b.WriteString("\n")
 
 	if len(m.picked) > 0 {
 		var total int64
@@ -175,7 +198,11 @@ func (m Model) viewWaiting() string {
 			detail := formatBytes(f.size)
 			if f.isDir {
 				label = "• 📁 " + f.name
-				detail = t.PickFolderFiles(f.files, formatBytes(f.size))
+				if f.approx {
+					detail = t.PickFolderApprox(f.files, formatBytes(f.size))
+				} else {
+					detail = t.PickFolderFiles(f.files, formatBytes(f.size))
+				}
 			}
 			b.WriteString(m.st.file.Render(label) + " " + m.st.size.Render("("+detail+")") + "\n")
 		}

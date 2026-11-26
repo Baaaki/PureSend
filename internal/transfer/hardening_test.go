@@ -1095,3 +1095,83 @@ func TestCollectSymlinkedDirectory(t *testing.T) {
 		t.Fatalf("Collect = %+v, want single entry shared/inside.txt", entries)
 	}
 }
+
+func TestManifestRejectsConflictingFileAndFolderPaths(t *testing.T) {
+	d := digestOf([]byte("x"))
+	for name, files := range map[string][]FileInfo{
+		"file then nested file": {
+			{Path: "rapor", Size: 1, SHA256: d},
+			{Path: "rapor/detay.pdf", Size: 1, SHA256: d},
+		},
+		"nested file then file": {
+			{Path: "rapor/detay.pdf", Size: 1, SHA256: d},
+			{Path: "rapor", Size: 1, SHA256: d},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := checkManifest(t.TempDir(), Manifest{Files: files}); err == nil {
+				t.Fatal("checkManifest accepted conflicting file and folder paths")
+			}
+		})
+	}
+
+	outDir := t.TempDir()
+	writeTempFile(t, outDir, "rapor", []byte("existing file"))
+	m := Manifest{Files: []FileInfo{{Path: "rapor/detay.pdf", Size: 1, SHA256: d}}}
+	if _, err := checkManifest(outDir, m); err == nil || !strings.Contains(err.Error(), "cannot create folder") {
+		t.Fatalf("expected existing file conflict error, got %v", err)
+	}
+}
+
+func TestAdaptiveCompressionHandlesMixedPayload(t *testing.T) {
+	// 3 MB of incompressible random data (enough to trigger adaptive skip
+	// across >80 chunks) followed by 1 MB of highly compressible text (to
+	// verify periodic probing re-enables Huffman compression).
+	randomPart := make([]byte, 3<<20)
+	if _, err := rand.Read(randomPart); err != nil {
+		t.Fatal(err)
+	}
+	textPart := bytes.Repeat([]byte("PureSend adaptive Huffman compression probe test line!\n"), 20_000)
+	payload := append(randomPart, textPart...)
+
+	src := writeTempFile(t, t.TempDir(), "mixed.bin", payload)
+	offer, err := NewOffer([]string{src})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sender, receiver := net.Pipe()
+	var wireBytes atomic.Int64
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(&countingConn{Conn: sender, written: &wireBytes}, offer, testCreds(), SendOptions{})
+	}()
+
+	outDir := t.TempDir()
+	saved, err := Receive(receiver, outDir, testCreds(), nil, Hooks{})
+	if err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	got, err := os.ReadFile(saved[0])
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatal("mixed adaptive-compression payload did not arrive intact")
+	}
+	if wireBytes.Load() >= int64(len(payload)) {
+		t.Errorf("wire bytes (%d) >= raw payload (%d); trailing compressible section did not compress",
+			wireBytes.Load(), len(payload))
+	}
+}
+
+type countingConn struct {
+	net.Conn
+	written *atomic.Int64
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.written.Add(int64(n))
+	return n, err
+}

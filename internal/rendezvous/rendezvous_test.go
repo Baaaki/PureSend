@@ -600,3 +600,17 @@ func TestAbandonedRoomsRespectRetiredCap(t *testing.T) {
 		t.Errorf("len(retired) = %d, exceeds maxLookupPeers (%d)", len(r.retired), maxLookupPeers)
 	}
 }
+
+func TestRecentlyRetiredNameplatesAreRested(t *testing.T) {
+	r := NewRegistry(WithMaxRoomsPerPeer(100))
+	np := open(t, r, sender)
+	if resp := r.handle(sender, Request{Type: "unregister", Nameplate: np}); resp.Type != "ok" {
+		t.Fatalf("unregister failed: %+v", resp)
+	}
+	for range 40 {
+		fresh := r.freeNameplate()
+		if fresh == np {
+			t.Fatalf("freeNameplate handed out %s immediately after it was closed", np)
+		}
+	}
+}

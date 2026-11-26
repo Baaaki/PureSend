@@ -81,9 +81,14 @@ func main() {
 			"comma-separated STUN servers used to discover WAN IP (default: Cloudflare and Google)")
 		flagLang = flag.String("lang", envOr("FT_LANG", ""),
 			"display language: tr, en, or auto (default: auto-detected OS language)")
+		noUpdateCheck = flag.Bool("no-update-check",
+			os.Getenv("FT_NO_UPDATE_CHECK") != "" || os.Getenv("DO_NOT_TRACK") == "1",
+			"disable automatic GitHub release check when opening the TUI")
 	)
 	flag.Var(&send, "send", "headless: send a file or folder (repeatable, or comma-separated) and print a room code")
 	flag.Parse()
+
+	cleanupOldBinary()
 
 	userLang := *flagLang
 	if userLang == "" || userLang == "auto" {
@@ -194,13 +199,25 @@ func main() {
 	default:
 		maybeSpawnTerminal()
 		run(tui.Run(tui.Config{
-			Servers:     servers,
-			ServerList:  *serverList,
-			STUNServers: stunList,
-			OutDir:      *out,
-			Version:     version,
-			Lang:        userLang,
+			Servers:       servers,
+			ServerList:    *serverList,
+			STUNServers:   stunList,
+			OutDir:        *out,
+			Version:       version,
+			Lang:          userLang,
+			NoUpdateCheck: *noUpdateCheck,
 		}), userLang)
+	}
+}
+
+// cleanupOldBinary removes any leftover .old executable left behind by an
+// earlier in-place `puresend -update` on Windows.
+func cleanupOldBinary() {
+	if runtime.GOOS != "windows" {
+		return
+	}
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		_ = os.Remove(exe + ".old")
 	}
 }
 
@@ -217,8 +234,8 @@ func maybeSpawnTerminal() {
 	if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
 		return
 	}
-	// If already running in a terminal emulator, do nothing.
-	if term.IsTerminal(os.Stdin.Fd()) || term.IsTerminal(os.Stdout.Fd()) {
+	// If already running in a terminal emulator (even with stdout redirected), do nothing.
+	if term.IsTerminal(os.Stdin.Fd()) || term.IsTerminal(os.Stdout.Fd()) || term.IsTerminal(os.Stderr.Fd()) {
 		return
 	}
 
@@ -234,6 +251,8 @@ func maybeSpawnTerminal() {
 	}
 	choices := []termChoice{
 		{"x-terminal-emulator", []string{"-e"}},
+		{"ptyxis", []string{"--"}},
+		{"kgx", []string{"-e"}},
 		{"gnome-terminal", []string{"--"}},
 		{"mate-terminal", []string{"-e"}},
 		{"xfce4-terminal", []string{"-e"}},

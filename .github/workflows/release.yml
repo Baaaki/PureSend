@@ -80,17 +80,27 @@ jobs:
             exit 1
           fi
 
-      # A tag is a promise that this commit works. Check it before six
-      # binaries go out under that promise, not after.
-      - name: Vet and test
+      # A tag is a promise that this commit works. Since tags are pushed
+      # before main (docs/DEPLOYMENT.md) and published releases are immutable,
+      # run formatting, linting, vulnerability scanning, and the full race
+      # test suite (including end-to-end binary tests) before building.
+      - name: Check formatting, lint, vulncheck, and full test suite
         env:
           # The client reads both from the environment. A test whose own
           # server is unreachable must fail, not find the production one.
           FT_SERVER: ""
           FT_SERVER_LIST: ""
         run: |
+          unformatted="$(gofmt -l $(find . -name '*.go'))"
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
           go vet ./...
-          go test -race -short -timeout 15m ./...
+          make lint
+          make vuln
+          go test -race -timeout 15m ./...
 
       # Signing checksums.txt with minisign is what lets `puresend -update`
       # tell that the list of digests came from whoever holds the key, not

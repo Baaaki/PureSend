@@ -186,12 +186,15 @@ func (o *Offer) Progress() (done, total int) {
 	return o.done, len(o.entries)
 }
 
+const digestBufSize = 128 * 1024
+
 func (o *Offer) read(ctx context.Context, hooks Hooks) {
 	files := make([]digested, len(o.entries))
+	buf := make([]byte, digestBufSize)
 	var err error
 	for i, e := range o.entries {
 		hooks.prepare(e.Rel, i+1, len(o.entries))
-		if files[i], err = digest(ctx, e); err != nil {
+		if files[i], err = digest(ctx, e, buf); err != nil {
 			break
 		}
 		o.mu.Lock()
@@ -218,14 +221,18 @@ func (o *Offer) manifest(hooks Hooks) (Manifest, error) {
 	}
 
 	m := Manifest{Files: make([]FileInfo, len(o.files))}
+	var buf []byte
 	for i, e := range o.entries {
 		st, err := os.Stat(e.Local)
 		if err != nil {
 			return Manifest{}, SourceError{fmt.Errorf("could not read %s: %w", path.Base(e.Rel), err)}
 		}
 		if st.Size() != o.files[i].info.Size || !st.ModTime().Equal(o.files[i].modTime) {
+			if buf == nil {
+				buf = make([]byte, digestBufSize)
+			}
 			hooks.prepare(e.Rel, i+1, len(o.entries))
-			if o.files[i], err = digest(context.Background(), e); err != nil {
+			if o.files[i], err = digest(context.Background(), e, buf); err != nil {
 				return Manifest{}, err
 			}
 		}
@@ -237,7 +244,7 @@ func (o *Offer) manifest(hooks Hooks) (Manifest, error) {
 // digest reads a file to compute its size and SHA-256. The file is looked
 // at *before* it is read, so a change made while the read is under way
 // leaves a stamp that no longer matches and is caught next time.
-func digest(ctx context.Context, e Entry) (digested, error) {
+func digest(ctx context.Context, e Entry, buf []byte) (digested, error) {
 	f, err := os.Open(e.Local)
 	if err != nil {
 		return digested{}, SourceError{fmt.Errorf("could not open file: %w", err)}
@@ -253,7 +260,7 @@ func digest(ctx context.Context, e Entry) (digested, error) {
 	}
 
 	h := sha256.New()
-	n, err := io.Copy(h, ctxReader{ctx, f})
+	n, err := io.CopyBuffer(h, ctxReader{ctx, f}, buf)
 	if err != nil {
 		if ctx.Err() != nil {
 			return digested{}, ctx.Err()

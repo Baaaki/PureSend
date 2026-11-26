@@ -72,6 +72,12 @@ const DefaultMaxRoomsPerPeer = 1
 // a slot in the table for the rest of its hour.
 const ownerGrace = 1 * time.Minute
 
+// retiredCooldown is how long a recently closed room's nameplate is avoided
+// when handing out fresh random nameplates, so a receiver re-running an old
+// command does not collide with a new sender and spend one of its wrong-code
+// attempts.
+var retiredCooldown = 3 * time.Minute
+
 // Nameplates are public, so a lookup no longer tests a guess at anything:
 // it says where a room is, which the nameplate never hid. What is worth
 // slowing down is walking them. Every room found is one a stranger can
@@ -270,6 +276,10 @@ type roomEntry struct {
 	// ownerGone is when the owner's last connection to the server closed;
 	// zero while it is connected.
 	ownerGone time.Time
+
+	// retiredAt is when the room was closed or abandoned, used to rest its
+	// nameplate briefly before handing the same number out again.
+	retiredAt time.Time
 }
 
 // window counts events inside a fixed time window.
@@ -491,13 +501,23 @@ func (r *Registry) register(from peer.ID, req Request) Response {
 
 const nameplateSparsity = 10
 
+func (r *Registry) recentlyRetired(np string, now time.Time) bool {
+	if retiredCooldown <= 0 {
+		return false
+	}
+	e, ok := r.retired[np]
+	return ok && !e.retiredAt.IsZero() && now.Sub(e.retiredAt) < retiredCooldown
+}
+
 // freeNameplate picks an unused nameplate at random from the shortest range
 // that is still sparse: at most one in nameplateSparsity of its numbers is
 // taken. It starts with two-digit numbers (10-99) and dynamically grows to
 // longer ones (100-999, 1000-9999, 10000-99999, etc.) as the server gets
 // crowded, keeping codes as short as load permits while preventing mistyped
-// numbers from colliding. Called with the lock held.
+// numbers from colliding. Recently retired nameplates are rested briefly so
+// straggling receivers do not hit a fresh room. Called with the lock held.
 func (r *Registry) freeNameplate() string {
+	now := time.Now()
 	lo, hi := 10, 99
 	for {
 		size := hi - lo + 1
@@ -507,10 +527,20 @@ func (r *Registry) freeNameplate() string {
 				used++
 			}
 		}
+		for np := range r.retired {
+			if _, active := r.rooms[np]; active {
+				continue
+			}
+			if r.recentlyRetired(np, now) {
+				if n, err := strconv.Atoi(np); err == nil && n >= lo && n <= hi {
+					used++
+				}
+			}
+		}
 		if (used+1)*nameplateSparsity <= size {
 			for {
 				np := strconv.Itoa(lo + mrand.IntN(size))
-				if _, taken := r.rooms[np]; !taken {
+				if _, taken := r.rooms[np]; !taken && !r.recentlyRetired(np, now) {
 					return np
 				}
 			}
@@ -524,7 +554,7 @@ func (r *Registry) freeNameplate() string {
 	}
 	for {
 		np := strconv.Itoa(10 + mrand.IntN(1_000_000_000-10))
-		if _, taken := r.rooms[np]; !taken {
+		if _, taken := r.rooms[np]; !taken && !r.recentlyRetired(np, now) {
 			return np
 		}
 	}
@@ -583,6 +613,7 @@ func (r *Registry) retireRoomLocked(room string, entry roomEntry, now time.Time,
 			}
 		}
 	}
+	entry.retiredAt = now
 	r.retired[room] = entry
 }
 

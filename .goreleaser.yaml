@@ -30,8 +30,7 @@ builds:
       - -X main.defaultServer={{ .Env.FT_SERVER }}
       - -X main.defaultServerList={{ envOrDefault "FT_SERVER_LIST" "https://puresend.madebybaki.com/server.txt" }}
       # The minisign public key `puresend -update` checks releases against.
-      # Empty until release signing is set up; see docs/DEPLOYMENT.md.
-      - -X puresend/internal/update.publicKey={{ envOrDefault "FT_UPDATE_KEY" "" }}
+      - -X puresend/internal/update.publicKey={{ envOrDefault "FT_UPDATE_KEY" "RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts" }}
       # Stamped so `puresend -version` can answer the first
       # question any bug report raises.
       - -X main.version={{ .Version }}

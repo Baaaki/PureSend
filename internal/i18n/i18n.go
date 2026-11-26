@@ -80,10 +80,15 @@ type Messages struct {
 	PickHelp2          string
 	PickHelp3          string
 	PickSelected       func(n int) string
+	PickMoreSelected   func(n int) string
 	PickFolderFiles    func(count int, size string) string
+	PickFolderApprox   func(count int, size string) string
 	PickTotal          func(size string) string
 	PickStartBtn       string
 	PickEmpty          string
+	PickUnsafeFolder   string
+	PickEmptyFolder    string
+	PickTooManyFiles   func(limit int) string
 	PickFooterSelected string
 	PickFooterEmpty    string
 
@@ -105,6 +110,7 @@ type Messages struct {
 	WaitingHelp3     string
 	WaitingFiles     func(count int) string
 	WaitingMoreFiles func(count int) string
+	WaitingCopied    string
 	WaitingFooter    string
 
 	// Hosting notes
@@ -212,7 +218,7 @@ var trMessages = &Messages{
 	ConnectingHelp1:  "Bu, iki bilgisayarın birbirini bulmasını sağlayan küçük bir",
 	ConnectingHelp2:  "adres defteri. Dosyaların oraya gitmiyor, sadece",
 	ConnectingHelp3:  "\"buradayım\" diyorsun.",
-	ConnectingFooter: "[Ctrl+C] İptal",
+	ConnectingFooter: "[Esc] Ana Menü  ·  [Ctrl+C] Çıkış",
 
 	PickTitle: "📤  Ne göndereceksin?",
 	PickHelp1: "Klasörlerin içine girmek için [Enter]'a, bir üst klasöre",
@@ -221,16 +227,27 @@ var trMessages = &Messages{
 	PickSelected: func(n int) string {
 		return fmt.Sprintf("Seçtiklerin (%d):", n)
 	},
+	PickMoreSelected: func(n int) string {
+		return fmt.Sprintf("  ... ve %d seçim daha", n)
+	},
 	PickFolderFiles: func(count int, size string) string {
 		return fmt.Sprintf("%d dosya, %s", count, size)
+	},
+	PickFolderApprox: func(count int, size string) string {
+		return fmt.Sprintf("%d+ dosya, %s+", count, size)
 	},
 	PickTotal: func(size string) string {
 		return "  Toplam: " + size
 	},
-	PickStartBtn:       "[s]  ·  Göndermeye başla",
-	PickEmpty:          "Henüz bir şey seçmedin.",
-	PickFooterSelected: "[↑/↓] Gezin  ·  [Enter] Gir / Dosya Seç  ·  [Backspace/←] Üst Klasör  ·  [f] Klasörü Seç  ·  [x] Dosyayı Çıkar  ·  [s] Başlat  ·  [Esc] Ana Menü  ·  [L] Dil: English  ·  [Ctrl+C] Çıkış",
-	PickFooterEmpty:    "[↑/↓] Gezin  ·  [Enter] Gir / Dosya Seç  ·  [Backspace/←] Üst Klasör  ·  [f] Klasörü Seç  ·  [Esc] Ana Menü  ·  [L] Dil: English  ·  [Ctrl+C] Çıkış",
+	PickStartBtn:     "[s]  ·  Göndermeye başla",
+	PickEmpty:        "Henüz bir şey seçmedin.",
+	PickUnsafeFolder: "Ev klasörünün kendisi veya sistem kökü tek seferde gönderilemez; içinden bir klasör seçin.",
+	PickEmptyFolder:  "Bu klasörde gönderilecek normal dosya yok.",
+	PickTooManyFiles: func(limit int) string {
+		return fmt.Sprintf("Bu klasörde tek seferde gönderilebilecek sınırı (%d dosya) aşan sayıda dosya var.", limit)
+	},
+	PickFooterSelected: "[↑/↓] Gezin  ·  [Enter] Gir / Dosya Seç  ·  [Backspace/←] Üst Klasör  ·  [f] Klasörü Seç  ·  [.] Gizli Dosyalar  ·  [x] Dosyayı Çıkar  ·  [s] Başlat  ·  [Esc] Ana Menü  ·  [L] Dil: English",
+	PickFooterEmpty:    "[↑/↓] Gezin  ·  [Enter] Gir / Dosya Seç  ·  [Backspace/←] Üst Klasör  ·  [f] Klasörü Seç  ·  [.] Gizli Dosyalar  ·  [Esc] Ana Menü  ·  [L] Dil: English",
 
 	OutDirTitle:   "📁  İnen dosyalar nereye kaydedilsin?",
 	OutDirHelp1:   "• [Enter] : Seçili klasörün içine gir",
@@ -240,7 +257,7 @@ var trMessages = &Messages{
 	OutDirSelectBtn: func(dir string) string {
 		return "[s]  ·  Burayı seç (" + dir + ")"
 	},
-	OutDirFooter: "[↑/↓] Gezin  ·  [Enter] Gir  ·  [Backspace/←] Üst Klasör  ·  [s] Seç  ·  [Esc] Vazgeç",
+	OutDirFooter: "[↑/↓] Gezin  ·  [Enter] Gir  ·  [Backspace/←] Üst Klasör  ·  [.] Gizli Klasörler  ·  [s] Seç  ·  [Esc] Vazgeç",
 	OutDirUnsafe: "Dosyalar doğrudan ev klasörüne veya sistem köküne kaydedilemez; lütfen içine bir alt klasör seçin.",
 
 	WaitingTitle:  "🔑  Oda kodun hazır!",
@@ -254,7 +271,8 @@ var trMessages = &Messages{
 	WaitingMoreFiles: func(n int) string {
 		return fmt.Sprintf("  ... ve %d dosya daha", n)
 	},
-	WaitingFooter: "[L] Dil: English  ·  [Ctrl+C] İptal Et",
+	WaitingCopied: "✓ Oda kodu panoya kopyalandı",
+	WaitingFooter: "[c] Kodu Kopyala  ·  [L] Dil: English  ·  [Esc] Ana Menü  ·  [Ctrl+C] Çıkış",
 
 	HostReady: "✓ Dosyalar gönderilmeye hazır",
 	HostPreparing: func(cur, total int) string {
@@ -279,7 +297,7 @@ var trMessages = &Messages{
 	FindingTitle:     "Aranıyor",
 	FindingHelp1:     "İki bilgisayar arasında doğrudan bir yol açılmaya",
 	FindingHelp2:     "çalışılıyor. Bu birkaç saniye sürebilir.",
-	FindingFooter:    "[Ctrl+C] İptal Et",
+	FindingFooter:    "[Esc] Ana Menü  ·  [Ctrl+C] Çıkış",
 	StatusLookingUp:  "Kod kontrol ediliyor...",
 	StatusConnecting: "Arkadaşının bilgisayarına bağlanılıyor...",
 	StatusDirect:     "Doğrudan yol açılıyor...",
@@ -400,7 +418,7 @@ var enMessages = &Messages{
 	ConnectingHelp1:  "This is a lightweight signaling registry connecting peers.",
 	ConnectingHelp2:  "Your files do not go through it; you only register your",
 	ConnectingHelp3:  "address to find each other.",
-	ConnectingFooter: "[Ctrl+C] Cancel",
+	ConnectingFooter: "[Esc] Main Menu  ·  [Ctrl+C] Quit",
 
 	PickTitle: "📤  What do you want to send?",
 	PickHelp1: "Press [Enter] to open folders, [Backspace] or [←] to go up.",
@@ -409,16 +427,27 @@ var enMessages = &Messages{
 	PickSelected: func(n int) string {
 		return fmt.Sprintf("Selected (%d):", n)
 	},
+	PickMoreSelected: func(n int) string {
+		return fmt.Sprintf("  ... and %d more selected", n)
+	},
 	PickFolderFiles: func(count int, size string) string {
 		return fmt.Sprintf("%d files, %s", count, size)
+	},
+	PickFolderApprox: func(count int, size string) string {
+		return fmt.Sprintf("%d+ files, %s+", count, size)
 	},
 	PickTotal: func(size string) string {
 		return "  Total: " + size
 	},
-	PickStartBtn:       "[s]  ·  Start sending",
-	PickEmpty:          "Nothing selected yet.",
-	PickFooterSelected: "[↑/↓] Navigate  ·  [Enter] Open / Select File  ·  [Backspace/←] Parent Dir  ·  [f] Select Folder  ·  [x] Remove File  ·  [s] Start Send  ·  [Esc] Main Menu  ·  [L] Language: Türkçe  ·  [Ctrl+C] Quit",
-	PickFooterEmpty:    "[↑/↓] Navigate  ·  [Enter] Open / Select File  ·  [Backspace/←] Parent Dir  ·  [f] Select Folder  ·  [Esc] Main Menu  ·  [L] Language: Türkçe  ·  [Ctrl+C] Quit",
+	PickStartBtn:     "[s]  ·  Start sending",
+	PickEmpty:        "Nothing selected yet.",
+	PickUnsafeFolder: "Your home folder itself or system root cannot be sent whole; choose a folder inside it.",
+	PickEmptyFolder:  "There are no regular files to send in this folder.",
+	PickTooManyFiles: func(limit int) string {
+		return fmt.Sprintf("This folder has more than the %d-file limit per transfer.", limit)
+	},
+	PickFooterSelected: "[↑/↓] Navigate  ·  [Enter] Open / Select File  ·  [Backspace/←] Parent Dir  ·  [f] Select Folder  ·  [.] Hidden Files  ·  [x] Remove File  ·  [s] Start Send  ·  [Esc] Main Menu  ·  [L] Language: Türkçe",
+	PickFooterEmpty:    "[↑/↓] Navigate  ·  [Enter] Open / Select File  ·  [Backspace/←] Parent Dir  ·  [f] Select Folder  ·  [.] Hidden Files  ·  [Esc] Main Menu  ·  [L] Language: Türkçe",
 
 	OutDirTitle:   "📁  Where should incoming files be saved?",
 	OutDirHelp1:   "• [Enter] : Open selected folder",
@@ -428,7 +457,7 @@ var enMessages = &Messages{
 	OutDirSelectBtn: func(dir string) string {
 		return "[s]  ·  Select here (" + dir + ")"
 	},
-	OutDirFooter: "[↑/↓] Navigate  ·  [Enter] Open Folder  ·  [Backspace/←] Parent Dir  ·  [s] Select Dir  ·  [Esc] Cancel",
+	OutDirFooter: "[↑/↓] Navigate  ·  [Enter] Open Folder  ·  [Backspace/←] Parent Dir  ·  [.] Hidden Folders  ·  [s] Select Dir  ·  [Esc] Cancel",
 	OutDirUnsafe: "Files cannot be saved straight into your home folder or system root; choose a folder inside it.",
 
 	WaitingTitle:  "🔑  Your room code is ready!",
@@ -442,7 +471,8 @@ var enMessages = &Messages{
 	WaitingMoreFiles: func(n int) string {
 		return fmt.Sprintf("  ... and %d more files", n)
 	},
-	WaitingFooter: "[L] Language: Türkçe  ·  [Ctrl+C] Cancel",
+	WaitingCopied: "✓ Room code copied to clipboard",
+	WaitingFooter: "[c] Copy Code  ·  [L] Language: Türkçe  ·  [Esc] Main Menu  ·  [Ctrl+C] Quit",
 
 	HostReady: "✓ Files are ready to send",
 	HostPreparing: func(cur, total int) string {
@@ -471,7 +501,7 @@ var enMessages = &Messages{
 	FindingTitle:     "Connecting",
 	FindingHelp1:     "Attempting direct peer-to-peer connection between both computers.",
 	FindingHelp2:     "This usually takes a few seconds.",
-	FindingFooter:    "[Ctrl+C] Cancel",
+	FindingFooter:    "[Esc] Main Menu  ·  [Ctrl+C] Quit",
 	StatusLookingUp:  "Looking up room code...",
 	StatusConnecting: "Connecting to your friend's computer...",
 	StatusDirect:     "Establishing direct P2P route...",
@@ -755,6 +785,10 @@ func Explain(err error, lang Lang) (string, []string) {
 			return "Your friend's computer could not read the files.", []string{
 				"Ask your friend to check that the files exist and start a new transfer.",
 			}
+		case has("cannot create folder"):
+			return "An incoming folder conflicts with an existing file in the download folder.", []string{
+				"Choose a clean download folder from the main menu or move the conflicting file aside.",
+			}
 		case has("invalid file list", "message exceeds"):
 			return "The other side sent an invalid file list.", []string{
 				"Transfer halted for safety; nothing was written to disk.",
@@ -972,6 +1006,10 @@ func Explain(err error, lang Lang) (string, []string) {
 	case has("sender could not prepare"):
 		return "Arkadaşının bilgisayarı dosyaları okuyamadı.", []string{
 			"Arkadaşın dosyaların yerinde durduğunu kontrol edip baştan göndersin.",
+		}
+	case has("cannot create folder"):
+		return "Gelen klasörlerden biri indirme klasöründeki var olan bir dosyayla çakışıyor.", []string{
+			"Ana menüden boş bir indirme klasörü seçin veya çakışan dosyayı başka yere taşıyın.",
 		}
 	case has("invalid file list", "message exceeds"):
 		return "Karşı taraf geçersiz bir dosya listesi gönderdi.", []string{

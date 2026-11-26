@@ -50,11 +50,12 @@ const (
 )
 
 type pickedFile struct {
-	path  string
-	name  string
-	size  int64
-	isDir bool
-	files int
+	path   string
+	name   string
+	size   int64
+	isDir  bool
+	files  int
+	approx bool
 }
 
 // Config starts the interface with baked-in defaults.
@@ -73,20 +74,23 @@ type Config struct {
 	STUNServers []string
 	// Lang sets the initial interface language ("tr" or "en"). If empty, defaults to Turkish for compatibility or FT_LANG.
 	Lang string
+	// NoUpdateCheck disables the background GitHub release check on startup.
+	NoUpdateCheck bool
 }
 
 // Model is the whole application state.
 type Model struct {
-	servers     []string
-	serverList  string
-	stunServers []string
-	version     string
-	lang        i18n.Lang
-	screen      screen
-	mode        mode
-	width       int
-	height      int
-	st          styles
+	servers       []string
+	serverList    string
+	stunServers   []string
+	version       string
+	noUpdateCheck bool
+	lang          i18n.Lang
+	screen        screen
+	mode          mode
+	width         int
+	height        int
+	st            styles
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -99,11 +103,14 @@ type Model struct {
 	// sending
 	picker     filepicker.Model
 	picked     []pickedFile
+	pickErr    string
 	room       string
-	prepared   bool // every file has been read and the offer is ready
-	serverLost bool // the meeting point dropped; the room is being put back
-	retrying   bool // an attempt broke off; the room waits for another
-	wrongLeft  int  // wrong codes the room still survives; 0 until one is tried
+	copied     bool  // room code copied to clipboard
+	prepared   bool  // every file has been read and the offer is ready
+	serverLost bool  // the meeting point dropped; the room is being put back
+	retrying   bool  // an attempt broke off; the room waits for another
+	retryErr   error // reason the previous send attempt failed, if any
+	wrongLeft  int   // wrong codes the room still survives; 0 until one is tried
 
 	// updateTag is the newer release on offer, if any. Notices are kept as
 	// facts like this and put into words when drawn, so they follow the
@@ -196,19 +203,20 @@ func New(cfg Config) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return Model{
-		servers:     cfg.Servers,
-		serverList:  cfg.ServerList,
-		stunServers: cfg.STUNServers,
-		version:     cfg.Version,
-		lang:        l,
-		screen:      screenWelcome,
-		st:          newStyles(true),
-		ctx:         ctx,
-		cancel:      cancel,
-		picker:      fp,
-		dirPicker:   dp,
-		codeInput:   ti,
-		outDir:      outDir,
+		servers:       cfg.Servers,
+		serverList:    cfg.ServerList,
+		stunServers:   cfg.STUNServers,
+		version:       cfg.Version,
+		noUpdateCheck: cfg.NoUpdateCheck,
+		lang:          l,
+		screen:        screenWelcome,
+		st:            newStyles(true),
+		ctx:           ctx,
+		cancel:        cancel,
+		picker:        fp,
+		dirPicker:     dp,
+		codeInput:     ti,
+		outDir:        outDir,
 	}
 }
 
@@ -320,8 +328,22 @@ func checkUpdateCmd(version string) tea.Cmd {
 	}
 }
 
+func (m Model) shouldCheckUpdate() bool {
+	if m.noUpdateCheck || m.version == "" || m.version == "dev" {
+		return false
+	}
+	if os.Getenv("FT_NO_UPDATE_CHECK") != "" || os.Getenv("DO_NOT_TRACK") == "1" {
+		return false
+	}
+	return true
+}
+
 func (m Model) Init() tea.Cmd {
 	// The terminal's background decides between the light and dark
 	// colours; the answer arrives as a BackgroundColorMsg.
-	return tea.Batch(tea.RequestBackgroundColor, m.picker.Init(), tick(), checkUpdateCmd(m.version))
+	cmds := []tea.Cmd{tea.RequestBackgroundColor, m.picker.Init(), tick()}
+	if m.shouldCheckUpdate() {
+		cmds = append(cmds, checkUpdateCmd(m.version))
+	}
+	return tea.Batch(cmds...)
 }

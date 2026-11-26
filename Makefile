@@ -26,7 +26,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 FT_SERVER ?=
 FT_SERVER_LIST ?=
-FT_UPDATE_KEY ?=
+FT_UPDATE_KEY ?= RWQ2F1ZFuTGorH4GqU4qC3PzJo5Evx2OKfNfJSiLbgyoEkMFDwUV8Kts
 
 LDFLAGS := -s -w \
 	-X main.version=$(VERSION) \

@@ -15,7 +15,9 @@ package headless
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path"
@@ -28,6 +30,8 @@ import (
 	"puresend/internal/p2p"
 	"puresend/internal/safetext"
 	"puresend/internal/transfer"
+
+	"github.com/charmbracelet/x/term"
 )
 
 // Send publishes the given files and folders under a fresh room code,
@@ -343,20 +347,28 @@ func askYesNo(ctx context.Context, l i18n.Lang) bool {
 	} else {
 		fmt.Fprint(os.Stderr, "accept? [y/N] ")
 	}
-	res := make(chan string, 1)
+	type answer struct {
+		line string
+		err  error
+	}
+	res := make(chan answer, 1)
 	go func() {
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			res <- ""
-			return
-		}
-		res <- line
+		res <- answer{line: line, err: err}
 	}()
 	select {
 	case <-ctx.Done():
 		return false
-	case line := <-res:
-		switch strings.ToLower(strings.TrimSpace(line)) {
+	case ans := <-res:
+		if strings.TrimSpace(ans.line) == "" && errors.Is(ans.err, io.EOF) && !term.IsTerminal(os.Stdin.Fd()) {
+			if l == i18n.TR {
+				fmt.Fprintln(os.Stderr, "\nnot: standart girdi kapalı; betiklerde otomatik onay için -yes bayrağını ekleyin")
+			} else {
+				fmt.Fprintln(os.Stderr, "\nnote: stdin is closed; pass -yes to accept automatically in scripts")
+			}
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(ans.line)) {
 		case "y", "yes", "e", "evet":
 			return true
 		}

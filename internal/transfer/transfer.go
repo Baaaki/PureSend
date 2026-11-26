@@ -64,8 +64,22 @@ const (
 	// keeps the manifest comfortably under maxManifestBytes.
 	maxFiles = 5000
 
+	// MaxFiles is exported so interfaces can validate selections eagerly.
+	MaxFiles = maxFiles
+
 	// chunkSize is how much is read and written at a time.
 	chunkSize = 32 * 1024
+
+	// streamBufSize sizes the buffered reader/writer on the stream so a
+	// 4-byte chunk header and its 32 KB payload coalesce into a single write
+	// instead of splitting at bufio's 4 KB default.
+	streamBufSize = 2 * chunkSize
+
+	// incomprThreshold is how many consecutive non-shrinking chunks trigger
+	// skipping Huffman compression, and incomprSkipRun is how many chunks are
+	// sent raw before probing compression again.
+	incomprThreshold = 8
+	incomprSkipRun   = 16
 
 	// maxChunkWireSize bounds any chunk read off the wire during compressed transfer.
 	maxChunkWireSize = 256 * 1024
@@ -346,12 +360,13 @@ func Send(s io.ReadWriteCloser, offer *Offer, creds Credentials, opts SendOption
 	useCompression := manifest.Compressed && goAhead.Compressed
 
 	// Send the bytes of each file, in manifest order.
-	w := bufio.NewWriter(s)
+	w := bufio.NewWriterSize(s, streamBufSize)
+	bufs := &sendBuffers{read: make([]byte, chunkSize)}
 	total := manifest.TotalSize()
 	var base int64
 	for i, info := range manifest.Files {
 		report := progressReporter(hooks, i, len(manifest.Files), base, total)
-		if err := sendFile(w, dl, offer.entries[i].Local, info, offsets[i], report, useCompression); err != nil {
+		if err := sendFileBuf(w, dl, offer.entries[i].Local, info, offsets[i], report, useCompression, bufs); err != nil {
 			return err
 		}
 		base += info.Size
@@ -482,7 +497,22 @@ func progressReporter(hooks Hooks, index, files int, base, overallTotal int64) f
 // sendFile writes a single file's bytes in chunks, starting at offset,
 // reporting progress after each chunk. When compressed is true, chunks
 // are framed and compressed on-the-fly using Huffman coding.
+type sendBuffers struct {
+	read []byte
+	comp []byte
+}
+
+type recvBuffers struct {
+	raw    []byte
+	wire   []byte
+	decomp []byte
+}
+
 func sendFile(w io.Writer, dl deadlines, local string, info FileInfo, offset int64, onProgress func(string, int64, int64), compressed bool) error {
+	return sendFileBuf(w, dl, local, info, offset, onProgress, compressed, nil)
+}
+
+func sendFileBuf(w io.Writer, dl deadlines, local string, info FileInfo, offset int64, onProgress func(string, int64, int64), compressed bool, bufs *sendBuffers) error {
 	if onProgress != nil {
 		onProgress(info.Path, offset, info.Size)
 	}
@@ -502,9 +532,12 @@ func sendFile(w io.Writer, dl deadlines, local string, info FileInfo, offset int
 		}
 	}
 
-	buf := make([]byte, chunkSize)
-	var compBuf []byte
+	if bufs == nil {
+		bufs = &sendBuffers{read: make([]byte, chunkSize)}
+	}
+	buf := bufs.read
 	var hdr [4]byte
+	var incomprStreak, skipRemaining int
 	sent := offset
 	for sent < info.Size {
 		// Never read past the size the manifest promised. A file that grew
@@ -515,16 +548,32 @@ func sendFile(w io.Writer, dl deadlines, local string, info FileInfo, offset int
 		if n > 0 {
 			dl.write(timeouts.idle)
 			if compressed {
-				compBuf = CompressChunk(compBuf, buf[:n])
-				if len(compBuf) < n {
-					binary.BigEndian.PutUint32(hdr[:], uint32(len(compBuf))|compressionFlag)
-					if _, werr := w.Write(hdr[:]); werr != nil {
-						return fmt.Errorf("connection lost while sending %s: %w", info.Name(), describe(werr))
+				tryCompress := true
+				if skipRemaining > 0 {
+					skipRemaining--
+					tryCompress = false
+				}
+				wroteCompressed := false
+				if tryCompress {
+					bufs.comp = CompressChunk(bufs.comp, buf[:n])
+					if len(bufs.comp) < n {
+						incomprStreak = 0
+						binary.BigEndian.PutUint32(hdr[:], uint32(len(bufs.comp))|compressionFlag)
+						if _, werr := w.Write(hdr[:]); werr != nil {
+							return fmt.Errorf("connection lost while sending %s: %w", info.Name(), describe(werr))
+						}
+						if _, werr := w.Write(bufs.comp); werr != nil {
+							return fmt.Errorf("connection lost while sending %s: %w", info.Name(), describe(werr))
+						}
+						wroteCompressed = true
+					} else {
+						incomprStreak++
+						if incomprStreak >= incomprThreshold {
+							skipRemaining = incomprSkipRun
+						}
 					}
-					if _, werr := w.Write(compBuf); werr != nil {
-						return fmt.Errorf("connection lost while sending %s: %w", info.Name(), describe(werr))
-					}
-				} else {
+				}
+				if !wroteCompressed {
 					binary.BigEndian.PutUint32(hdr[:], uint32(n))
 					if _, werr := w.Write(hdr[:]); werr != nil {
 						return fmt.Errorf("connection lost while sending %s: %w", info.Name(), describe(werr))
@@ -574,7 +623,7 @@ func Receive(s io.ReadWriteCloser, outDir string, creds Credentials, confirm fun
 	// Careful: json.Decoder cannot be used on this side. It buffers extra
 	// data from the stream internally and would swallow the beginning of
 	// the file bytes that follow the last JSON line.
-	r := bufio.NewReader(s)
+	r := bufio.NewReaderSize(s, streamBufSize)
 	enc := json.NewEncoder(s)
 	refuse := func(err error) error {
 		dl.write(timeouts.idle)
@@ -641,11 +690,15 @@ func Receive(s io.ReadWriteCloser, outDir string, creds Credentials, confirm fun
 	}
 
 	total := manifest.TotalSize()
+	bufs := &recvBuffers{}
+	if !useCompression {
+		bufs.raw = make([]byte, chunkSize)
+	}
 	var saved []string
 	var base int64
 	for i, f := range manifest.Files {
-		final, err := receiveFile(r, dl, outDir, targets[i], f, partials[i],
-			progressReporter(hooks, i, len(manifest.Files), base, total), useCompression)
+		final, err := receiveFileBuf(r, dl, outDir, targets[i], f, partials[i],
+			progressReporter(hooks, i, len(manifest.Files), base, total), useCompression, bufs)
 		if err != nil {
 			// Let the sender know, then propagate the error.
 			return saved, refuse(err)
@@ -921,6 +974,10 @@ func sweepPartials(outDir string) {
 // that looks complete — and what it does leave behind is exactly what the
 // next attempt resumes from.
 func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo, p partial, onProgress func(string, int64, int64), compressed bool) (string, error) {
+	return receiveFileBuf(r, dl, outDir, target, info, p, onProgress, compressed, nil)
+}
+
+func receiveFileBuf(r io.Reader, dl deadlines, outDir, target string, info FileInfo, p partial, onProgress func(string, int64, int64), compressed bool, bufs *recvBuffers) (string, error) {
 	if p.complete != "" {
 		if onProgress != nil {
 			onProgress(info.Path, info.Size, info.Size)
@@ -942,9 +999,12 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 		return "", fmt.Errorf("could not prepare %s: %w", info.Name(), err)
 	}
 
-	buf := make([]byte, chunkSize)
-	var wireBuf []byte
-	var decompBuf []byte
+	if bufs == nil {
+		bufs = &recvBuffers{}
+	}
+	if !compressed && len(bufs.raw) < chunkSize {
+		bufs.raw = make([]byte, chunkSize)
+	}
 	var hdr [4]byte
 	received := p.offset
 	if onProgress != nil {
@@ -963,27 +1023,27 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 				return "", fmt.Errorf("invalid chunk length (%d) for %s", wireLen, info.Name())
 			}
 
-			if cap(wireBuf) < wireLen {
-				wireBuf = make([]byte, wireLen)
+			if cap(bufs.wire) < wireLen {
+				bufs.wire = make([]byte, wireLen)
 			} else {
-				wireBuf = wireBuf[:wireLen]
+				bufs.wire = bufs.wire[:wireLen]
 			}
 
 			dl.read(timeouts.idle)
-			if _, err := io.ReadFull(r, wireBuf); err != nil {
+			if _, err := io.ReadFull(r, bufs.wire); err != nil {
 				return "", fmt.Errorf("connection lost while receiving %s: %w", info.Name(), describe(err))
 			}
 
 			var plain []byte
 			if isComp {
 				var err error
-				plain, err = DecompressChunk(decompBuf, wireBuf, chunkSize*2)
+				plain, err = DecompressChunk(bufs.decomp, bufs.wire, chunkSize*2)
 				if err != nil {
 					return "", fmt.Errorf("decompression error for %s: %w", info.Name(), err)
 				}
-				decompBuf = plain
+				bufs.decomp = plain
 			} else {
-				plain = wireBuf
+				plain = bufs.wire
 			}
 
 			if len(plain) == 0 {
@@ -1006,6 +1066,7 @@ func receiveFile(r io.Reader, dl deadlines, outDir, target string, info FileInfo
 				onProgress(info.Path, received, info.Size)
 			}
 		} else {
+			buf := bufs.raw
 			chunk := min(int64(len(buf)), info.Size-received)
 			// io.ReadFull tolerates a Read that returns the final bytes
 			// together with io.EOF; a bare Read loop would misreport that as a

@@ -103,12 +103,26 @@ Write-Host "==> Dosyalar cikariliyor..." -ForegroundColor Cyan
 Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 Remove-Item -Path $zipPath -Force
 
-# Add to user PATH if not already present
+# Add to user PATH if not already present (avoiding leading semicolons on
+# empty PATH and false-positive substring matches).
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($userPath -notlike "*$installDir*") {
+$entries = @()
+if ($userPath) {
+    $entries = $userPath -split ';' | Where-Object { $_.Trim() -ne '' }
+}
+$normInstall = $installDir.TrimEnd('\')
+$alreadyInPath = $false
+foreach ($entry in $entries) {
+    if ($entry.Trim().TrimEnd('\') -ieq $normInstall) {
+        $alreadyInPath = $true
+        break
+    }
+}
+if (-not $alreadyInPath) {
     Write-Host "==> PATH ortamina ekleniyor: $installDir" -ForegroundColor Cyan
-    [Environment]::SetEnvironmentVariable("Path", "$userPath;$installDir", "User")
-    $env:Path += ";$installDir"
+    $newUserPath = ($entries + $installDir) -join ';'
+    [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    $env:Path = ($env:Path.TrimEnd(';') + ";" + $installDir).TrimStart(';')
 }
 
 Write-Host "==> PureSend ($tag) basariyla kuruldu!" -ForegroundColor Green

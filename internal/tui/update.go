@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -71,7 +73,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, tea.Batch(cmd, waitEvent(msg.node))
 
 	case roomReadyMsg:
+		if m.mode == modeNone {
+			return m, nil
+		}
 		m.room = msg.room
+		m.copied = false
 		m.screen = screenWaiting
 		return m, nil
 
@@ -79,6 +85,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleEvent(msg.ev)
 
 	case errMsg:
+		if m.mode == modeNone {
+			return m, nil
+		}
 		m.err = msg.err
 		m.screen = screenError
 		return m, nil
@@ -118,6 +127,7 @@ func (m Model) handleEvent(ev p2p.Event) (tea.Model, tea.Cmd) {
 		}
 		m.haveConn = true
 		m.retrying = false
+		m.retryErr = nil
 		if m.screen != screenConfirm && m.screen != screenDone {
 			m.screen = screenTransfer
 		}
@@ -187,6 +197,7 @@ func (m Model) handleEvent(ev p2p.Event) (tea.Model, tea.Cmd) {
 			// receiver try the same code again.
 			if m.mode == modeSend && m.room != "" {
 				m.retrying = true
+				m.retryErr = e.Err
 				m.haveConn = false
 				m.prog = transfer.Progress{}
 				m.meter = rateMeter{}
@@ -217,6 +228,13 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenWelcome:
 		return m.welcomeKey(key)
+	case screenConnecting, screenFinding:
+		if key == "esc" {
+			return m.reset(), nil
+		}
+		return m, nil
+	case screenWaiting:
+		return m.waitingKey(key)
 	case screenPickFiles:
 		return m.pickFilesKey(msg)
 	case screenOutDir:
@@ -269,22 +287,43 @@ func (m Model) welcomeKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) waitingKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "c", "C":
+		if m.room != "" {
+			m.copied = true
+			return m, tea.SetClipboard(m.room)
+		}
+	case "esc":
+		return m.reset(), nil
+	}
+	return m, nil
+}
+
 func (m Model) pickFilesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		return m.reset(), nil
 	case "s", "S":
 		if len(m.picked) > 0 {
+			m.pickErr = ""
 			m.screen = screenConnecting
 			return m, hostCmd(m.ctx, m.node, m.picked)
 		}
 	case "f", "F":
+		m.pickErr = ""
 		m.addPath(m.picker.CurrentDirectory)
+	case ".":
+		m.pickErr = ""
+		m.picker.ShowHidden = !m.picker.ShowHidden
+		return m, m.picker.Init()
 	case "x", "X":
+		m.pickErr = ""
 		if len(m.picked) > 0 {
 			m.picked = m.picked[:len(m.picked)-1]
 		}
 	case "up", "down", "pgup", "pgdown", "enter", "backspace", "left":
+		m.pickErr = ""
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(msg)
 		if ok, path := m.picker.DidSelectFile(msg); ok {
@@ -307,6 +346,10 @@ func (m Model) outDirKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.outDirErr = ""
 		m.outDir = m.dirPicker.CurrentDirectory
 		m.screen = m.backScreen
+	case ".":
+		m.outDirErr = ""
+		m.dirPicker.ShowHidden = !m.dirPicker.ShowHidden
+		return m, m.dirPicker.Init()
 	case "esc", "q", "Q":
 		m.outDirErr = ""
 		m.screen = m.backScreen
@@ -470,46 +513,84 @@ func (m *Model) addPath(path string) {
 	}
 	pick := pickedFile{path: path, name: info.Name(), size: info.Size()}
 	if info.IsDir() {
-		if err := transfer.CheckDestination(path); err != nil {
+		if isUnsafeSendFolder(path) {
+			m.pickErr = i18n.Get(m.lang).PickUnsafeFolder
 			return
 		}
-		size, count := folderSize(path)
-		if count == 0 {
-			return // an empty folder would carry nothing across
+		size, count, overLimit, approx := folderSize(path)
+		if overLimit {
+			m.pickErr = i18n.Get(m.lang).PickTooManyFiles(transfer.MaxFiles)
+			return
 		}
-		pick.isDir, pick.size, pick.files = true, size, count
+		if count == 0 && !approx {
+			m.pickErr = i18n.Get(m.lang).PickEmptyFolder
+			return
+		}
+		pick.isDir, pick.size, pick.files, pick.approx = true, size, count, approx
 	} else if !info.Mode().IsRegular() {
 		return
 	}
 	m.picked = append(m.picked, pick)
 }
 
+// isUnsafeSendFolder refuses the drive root, the home folder itself, or a
+// folder above home when pressing [f] — while still allowing legitimate
+// subfolders inside hidden directories (such as ~/.local/share/...).
+func isUnsafeSendFolder(p string) bool {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return true
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	if filepath.Dir(abs) == abs {
+		return true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		abs, home = strings.ToLower(abs), strings.ToLower(home)
+	}
+	rel, err := filepath.Rel(abs, home)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 const (
-	maxFolderWalkEntries  = 10_000
+	maxFolderWalkEntries  = 50_000
 	maxFolderWalkDuration = 500 * time.Millisecond
 )
 
 // folderSize adds up what sending a folder would actually move. Symbolic
 // links are skipped here for the same reason the transfer skips them.
-func folderSize(root string) (int64, int) {
-	var total int64
-	var count, seen int
+func folderSize(root string) (size int64, count int, overLimit bool, approx bool) {
+	var seen int
 	deadline := time.Now().Add(maxFolderWalkDuration)
 	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
 		seen++
-		if seen > maxFolderWalkEntries || time.Now().After(deadline) {
+		if seen > maxFolderWalkEntries || (count > 0 && time.Now().After(deadline)) {
+			approx = true
 			return fs.SkipAll
 		}
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
 			return nil //nolint:nilerr // an unreadable corner should not stop the count
 		}
 		if info, err := d.Info(); err == nil {
-			total += info.Size()
+			size += info.Size()
 			count++
+			if count > transfer.MaxFiles {
+				overLimit = true
+				return fs.SkipAll
+			}
 		}
 		return nil
 	})
-	return total, count
+	return size, count, overLimit, approx
 }
 
 // reset ends the session and returns to the main menu. The network layer
@@ -517,18 +598,32 @@ func folderSize(root string) (int64, int) {
 // guarantees no leftover event can bleed into the next transfer.
 // Reconnecting costs a second, behind the spinner the user already sees.
 func (m Model) reset() Model {
-	if m.node != nil {
-		_ = m.node.Close()
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	if node := m.node; node != nil {
 		m.node = nil
+		if m.room != "" {
+			go func() {
+				node.CancelRoom()
+				_ = node.Close()
+			}()
+		} else {
+			_ = node.Close()
+		}
 	}
 	m.screen = screenWelcome
 	m.mode = modeNone
 	m.menuIndex = 0
 	m.picked = nil
+	m.pickErr = ""
 	m.room = ""
+	m.copied = false
 	m.prepared = false
 	m.serverLost = false
 	m.retrying = false
+	m.retryErr = nil
 	m.wrongLeft = 0
 	m.codeErr = ""
 	m.remoteDone, m.remoteTotal = 0, 0

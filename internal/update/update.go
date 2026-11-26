@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"puresend/internal/i18n"
+	"puresend/internal/minisign"
 )
 
 const (
@@ -38,14 +39,13 @@ var endpointURL = fmt.Sprintf("https://api.github.com/repos/%s/releases/latest",
 var allowInsecureDownload = false
 
 // publicKey is the minisign key a release's checksums.txt must be signed
-// with, baked in at build time:
+// with. Defaults to the official project signing key so source builds also
+// verify signatures; can be overridden or cleared at build time:
 //
 //	-ldflags "-X puresend/internal/update.publicKey=RWT..."
 //
-// Empty — a build from source, or a release made before signing was set
-// up — still requires and checks the checksums, just not their signature.
-// See minisign.go.
-var publicKey = ""
+// Empty skips the signature check while still requiring checksums.txt.
+var publicKey = minisign.DefaultPublicKey
 
 // Bounds on what an update downloads, so a hostile or broken server cannot
 // make it hold an endless response in memory.

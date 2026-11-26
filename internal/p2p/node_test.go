@@ -2,6 +2,9 @@ package p2p
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +18,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
+	"golang.org/x/crypto/blake2b"
 )
 
 // newTestNode builds a Node around a host that listens nowhere. Enough to
@@ -304,5 +308,130 @@ func TestKeepRoomExpiresWithoutDisconnect(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("room did not expire after roomTTL while connected")
+	}
+}
+
+// TestWaitForDirectChCatchesPreArmedGiveUp ensures that if DCUtR fails with a
+// ProtocolErrorEvt while host.Connect is still finishing, a pre-armed watcher
+// returns immediately instead of hanging for the full directWait timeout.
+func TestWaitForDirectChCatchesPreArmedGiveUp(t *testing.T) {
+	n := newTestNode(t)
+	defer n.Close()
+
+	friend := peer.ID("friend")
+	gaveUp := n.punch.watch(friend)
+	defer n.punch.forget(friend)
+
+	// Simulate DCUtR failing inside Connect before waitForDirectCh starts.
+	n.punch.Trace(&holepunch.Event{Remote: friend, Evt: &holepunch.ProtocolErrorEvt{Error: "no addrs"}})
+
+	start := time.Now()
+	if n.waitForDirectCh(context.Background(), friend, 10*time.Second, gaveUp) {
+		t.Fatal("reported direct connection when none exists")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("waitForDirectCh took %s despite pre-armed giveUp", elapsed)
+	}
+}
+
+// TestHooksThrottleAcrossManySmallFiles verifies that completing hundreds of
+// small files in rapid succession throttles intermediate per-file completions
+// while still delivering the final 100% progress event.
+func TestHooksThrottleAcrossManySmallFiles(t *testing.T) {
+	h, err := libp2p.New(libp2p.NoListenAddrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := &Node{
+		host:   h,
+		punch:  newPunchWatcher(),
+		events: make(chan Event, 64),
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+
+	hooks := n.hooks()
+	const files = 200
+	for i := 1; i <= files; i++ {
+		hooks.Progress(transfer.Progress{
+			Name:         fmt.Sprintf("f%d.txt", i),
+			Index:        i,
+			Files:        files,
+			Done:         10,
+			Total:        10,
+			OverallDone:  int64(i * 10),
+			OverallTotal: int64(files * 10),
+		})
+	}
+
+	var got []ProgressEvent
+	for len(n.events) > 0 {
+		got = append(got, (<-n.events).(ProgressEvent))
+	}
+	if len(got) == 0 || len(got) > 10 {
+		t.Fatalf("emitted %d progress events for %d instant files, want 2..10", len(got), files)
+	}
+	last := got[len(got)-1]
+	if last.Index != files || last.OverallDone != last.OverallTotal {
+		t.Errorf("final progress event = %+v, want final 100%% event", last)
+	}
+}
+
+func TestFetchServerListHTTPSAndSignature(t *testing.T) {
+	if _, err := fetchServerList(context.Background(), "http://example.com/server.txt"); err == nil {
+		t.Fatal("fetchServerList accepted a remote plain http:// URL")
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keyID [8]byte
+	_, _ = rand.Read(keyID[:])
+	pubText := base64.StdEncoding.EncodeToString(append(append([]byte("Ed"), keyID[:]...), pub...))
+
+	body := []byte("/dns4/a.example.com/tcp/443/tls/ws/p2p/12D3KooWtest\n")
+	digest := blake2b.Sum512(body)
+	sig := ed25519.Sign(priv, digest[:])
+	trusted := "timestamp:1790000000\tfile:server.txt"
+	global := ed25519.Sign(priv, append(append([]byte(nil), sig...), trusted...))
+	sigFile := []byte("untrusted comment: sig\n" +
+		base64.StdEncoding.EncodeToString(append(append([]byte("ED"), keyID[:]...), sig...)) + "\n" +
+		"trusted comment: " + trusted + "\n" +
+		base64.StdEncoding.EncodeToString(global) + "\n")
+
+	var serveTampered bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/server.txt":
+			if serveTampered {
+				_, _ = w.Write([]byte("/dns4/evil.example.com/tcp/443/tls/ws/p2p/12D3KooWevil\n"))
+				return
+			}
+			_, _ = w.Write(body)
+		case "/server.txt.minisig":
+			_, _ = w.Write(sigFile)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	savedKey := serverListPublicKey
+	serverListPublicKey = pubText
+	t.Cleanup(func() { serverListPublicKey = savedKey })
+
+	got, err := fetchServerList(context.Background(), srv.URL+"/server.txt")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("valid signed server list failed: %v (%v)", err, got)
+	}
+
+	serveTampered = true
+	if _, err := fetchServerList(context.Background(), srv.URL+"/server.txt"); err == nil {
+		t.Fatal("tampered server list passed minisign verification")
 	}
 }

@@ -57,10 +57,13 @@ func (p *publicAddress) IP() net.IP {
 	return nil
 }
 
-func (p *publicAddress) setQUIC(addr *net.UDPAddr) {
+func (p *publicAddress) setQUIC(addr *net.UDPAddr) bool {
+	prev := p.quic.Load()
+	changed := prev == nil || !prev.IP.Equal(addr.IP) || prev.Port != addr.Port
 	ip := addr.IP
 	p.ip.Store(&ip)
 	p.quic.Store(addr)
+	return changed
 }
 
 // rewrite is the host's address factory. It drops Docker bridge addresses

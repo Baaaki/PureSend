@@ -197,11 +197,13 @@ func (RoomLostEvent) isEvent()        {}
 // Node is a running libp2p host with an open connection to the
 // rendezvous server.
 type Node struct {
-	host    host.Host
-	servers []peer.AddrInfo // every meeting point known, in order of preference
-	server  atomic.Pointer[peer.AddrInfo]
-	punch   *punchWatcher
-	events  chan Event
+	host        host.Host
+	servers     []peer.AddrInfo // every meeting point known, in order of preference; guarded by mu
+	listURL     string
+	listFetched atomic.Bool
+	server      atomic.Pointer[peer.AddrInfo]
+	punch       *punchWatcher
+	events      chan Event
 
 	// public is what STUN has told us about our address on the internet.
 	public *publicAddress
@@ -339,6 +341,7 @@ func New(ctx context.Context, serverAddrs []string, opts ...Option) (*Node, erro
 	n := &Node{
 		host:       h,
 		servers:    infos,
+		listURL:    o.listURL,
 		punch:      punch,
 		public:     public,
 		events:     make(chan Event, 64),
@@ -353,17 +356,12 @@ func New(ctx context.Context, serverAddrs []string, opts ...Option) (*Node, erro
 	}
 
 	server, err := n.connectAny(ctx, infos)
-	if err != nil && o.listURL != "" {
+	if err != nil && n.listURL != "" {
 		// The addresses baked into this copy of the program are all dead —
 		// most likely the server moved. Ask the published list where it
 		// went, rather than dying with every other copy.
-		listed, lerr := fetchServerList(ctx, o.listURL)
-		if lerr == nil {
-			extra, perr := parseServers(listed)
-			if perr == nil {
-				n.servers = append(n.servers, extra...)
-				server, err = n.connectAny(ctx, extra)
-			}
+		if extra := n.loadServerList(ctx); len(extra) > 0 {
+			server, err = n.connectAny(ctx, extra)
 		}
 	}
 	if err != nil {
@@ -458,7 +456,13 @@ func (n *Node) keepMapping(conn net.PacketConn, servers []string, every time.Dur
 		}
 		ctx, cancel := context.WithTimeout(n.ctx, stunBudget)
 		if addr, err := stunMapping(ctx, conn, servers); err == nil {
-			n.public.setQUIC(addr)
+			if n.public.setQUIC(addr) {
+				if room := n.currentRoom(); room != "" {
+					rctx, rcancel := context.WithTimeout(n.ctx, 10*time.Second)
+					_ = n.refreshRoomAddrs(rctx, rendezvous.Nameplate(room))
+					rcancel()
+				}
+			}
 		}
 		cancel()
 	}
@@ -508,8 +512,9 @@ func (n *Node) hooks() transfer.Hooks {
 			n.emit(RemotePreparingEvent{Done: done, Total: total})
 		},
 		Progress: func(p transfer.Progress) {
-			// Always report the final chunk so the bar reaches 100%.
-			if p.Done < p.Total && time.Since(last) < progressInterval {
+			// Always report the final chunk of the transfer so the bar reaches 100%.
+			isFinal := (p.Files == 0 && p.Done >= p.Total) || (p.Index == p.Files && p.Done >= p.Total)
+			if !isFinal && time.Since(last) < progressInterval {
 				return
 			}
 			last = time.Now()
@@ -559,12 +564,8 @@ func (n *Node) Host(ctx context.Context, paths []string) (string, error) {
 	return room, nil
 }
 
-// announce registers the room on the current meeting point and reserves
-// a relay slot there — everything a receiver needs to reach us. An empty
-// nameplate asks for a new room; the one the server settled on is returned.
-func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
-	server := n.currentServer()
-
+// roomAddrs builds the prioritized list of addresses advertised for a room.
+func (n *Node) roomAddrs(server peer.AddrInfo) []multiaddr.Multiaddr {
 	// Prioritize addresses to advertise:
 	// 1. Direct public addresses (STUN IPv4 + Global IPv6)
 	// 2. Relay circuit addresses (fallback if both peers are behind NAT)
@@ -611,6 +612,26 @@ func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
 	if len(addrs) > rendezvous.MaxAddrs {
 		addrs = addrs[:rendezvous.MaxAddrs]
 	}
+	return addrs
+}
+
+// refreshRoomAddrs updates an already-open room's advertised addresses on the
+// current meeting point when our external STUN mapping changes.
+func (n *Node) refreshRoomAddrs(ctx context.Context, nameplate string) error {
+	server := n.currentServer()
+	if server.ID == "" || n.host.Network().Connectedness(server.ID) != network.Connected {
+		return nil
+	}
+	_, err := rendezvous.Register(ctx, n.host, server.ID, nameplate, n.roomAddrs(server))
+	return err
+}
+
+// announce registers the room on the current meeting point and reserves
+// a relay slot there — everything a receiver needs to reach us. An empty
+// nameplate asks for a new room; the one the server settled on is returned.
+func (n *Node) announce(ctx context.Context, nameplate string) (string, error) {
+	server := n.currentServer()
+	addrs := n.roomAddrs(server)
 
 	// Register the room before reserving the relay slot: the server's
 	// relay only serves peers with an active room, so the reservation
@@ -860,6 +881,11 @@ func (n *Node) restore() error {
 
 		ctx, cancel := context.WithTimeout(n.ctx, connectBudget)
 		server, err := n.connectAny(ctx, n.reconnectOrder())
+		if err != nil && n.listURL != "" {
+			if extra := n.loadServerList(ctx); len(extra) > 0 {
+				server, err = n.connectAny(ctx, extra)
+			}
+		}
 		if err == nil {
 			n.server.Store(&server)
 			// The same nameplate, or the code on the user's screen would
@@ -883,12 +909,58 @@ func (n *Node) restore() error {
 	}
 }
 
+// loadServerList fetches additional meeting points from n.listURL and appends
+// any newly discovered peers to n.servers.
+func (n *Node) loadServerList(ctx context.Context) []peer.AddrInfo {
+	if n.listURL == "" {
+		return nil
+	}
+	listed, err := fetchServerList(ctx, n.listURL)
+	if err != nil {
+		return nil
+	}
+	extra, err := parseServers(listed)
+	if err != nil || len(extra) == 0 {
+		return nil
+	}
+	n.listFetched.Store(true)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	known := make(map[peer.ID]bool, len(n.servers))
+	for _, s := range n.servers {
+		known[s.ID] = true
+	}
+	var added []peer.AddrInfo
+	for _, s := range extra {
+		if !known[s.ID] {
+			known[s.ID] = true
+			n.servers = append(n.servers, s)
+			added = append(added, s)
+		}
+	}
+	if len(added) > 0 {
+		return added
+	}
+	return extra
+}
+
+func (n *Node) serverListSnapshot() []peer.AddrInfo {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]peer.AddrInfo, len(n.servers))
+	copy(out, n.servers)
+	return out
+}
+
 // reconnectOrder is the meeting point we were using, then every other
 // one we know of: the room lives on the first, but any will do.
 func (n *Node) reconnectOrder() []peer.AddrInfo {
 	cur := n.currentServer()
-	order := []peer.AddrInfo{cur}
-	for _, s := range n.servers {
+	var order []peer.AddrInfo
+	if cur.ID != "" {
+		order = append(order, cur)
+	}
+	for _, s := range n.serverListSnapshot() {
 		if s.ID != cur.ID {
 			order = append(order, s)
 		}
@@ -910,6 +982,11 @@ func (n *Node) takeRoom() string {
 	room := n.room
 	n.room = ""
 	return room
+}
+
+// CancelRoom explicitly retires a hosted room before tearing down the session.
+func (n *Node) CancelRoom() {
+	n.closeRoom()
 }
 
 // closeRoom retires a room that has served its purpose: the handler goes
@@ -995,10 +1072,17 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	// Only the nameplate goes to the server; the words stay here, for the
 	// handshake with whoever the server points us at.
 	n.emit(StatusEvent{Text: StatusLookingUp})
-	sender, relayLimit, err := rendezvous.Lookup(ctx, n.host, n.currentServer().ID, rendezvous.Nameplate(room))
+	sender, relayLimit, err := n.lookupRoom(ctx, rendezvous.Nameplate(room))
 	if err != nil {
 		return nil, err
 	}
+
+	// Arm the hole-punch watcher before dialling: DCUtR starts as soon as
+	// the relayed connection and Identify finish inside Connect, and an
+	// immediate ProtocolErrorEvt or early failed attempt would otherwise be
+	// missed, stranding the receiver on the full directWait timeout.
+	gaveUp := n.punch.watch(sender.ID)
+	defer n.punch.forget(sender.ID)
 
 	n.emit(StatusEvent{Text: StatusConnecting})
 	dialCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -1010,7 +1094,7 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	// The first connection usually arrives through the relay; DCUtR then
 	// tries to replace it with a direct one in the background.
 	n.emit(StatusEvent{Text: StatusDirect})
-	direct := n.waitForDirect(ctx, sender.ID, directWait)
+	direct := n.waitForDirectCh(ctx, sender.ID, directWait, gaveUp)
 
 	streamCtx := ctx
 	if !direct {
@@ -1045,6 +1129,57 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 	}, confirm, n.hooks())
 }
 
+// lookupRoom queries the active meeting point first and, if the room is not
+// found there (or the stream fails), checks any other configured or listed
+// meeting points so a sender that failed over to a backup server stays
+// reachable even after the primary server recovers.
+func (n *Node) lookupRoom(ctx context.Context, nameplate string) (*peer.AddrInfo, int64, error) {
+	cur := n.currentServer()
+	sender, relayLimit, err := rendezvous.Lookup(ctx, n.host, cur.ID, nameplate)
+	if err == nil {
+		return sender, relayLimit, nil
+	}
+	if !shouldTryOtherServers(err) {
+		return nil, 0, err
+	}
+
+	tried := map[peer.ID]bool{cur.ID: true}
+	candidates := n.serverListSnapshot()
+	if n.listURL != "" && !n.listFetched.Load() {
+		candidates = append(candidates, n.loadServerList(ctx)...)
+	}
+
+	for _, cand := range candidates {
+		if cand.ID == "" || tried[cand.ID] {
+			continue
+		}
+		tried[cand.ID] = true
+		dialCtx, cancel := context.WithTimeout(network.WithForceDirectDial(ctx, "lookup fallback"), 10*time.Second)
+		n.host.Peerstore().AddAddrs(cand.ID, cand.Addrs, peerstore.PermanentAddrTTL)
+		connErr := n.host.Connect(dialCtx, cand)
+		cancel()
+		if connErr != nil {
+			continue
+		}
+		if s, limit, lerr := rendezvous.Lookup(ctx, n.host, cand.ID, nameplate); lerr == nil {
+			candCopy := cand
+			n.server.Store(&candCopy)
+			return s, limit, nil
+		}
+	}
+	return nil, 0, err
+}
+
+func shouldTryOtherServers(err error) bool {
+	if errors.Is(err, rendezvous.ErrRoomNotFound) {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "could not open stream") ||
+		strings.Contains(s, "could not send request") ||
+		strings.Contains(s, "could not read server response")
+}
+
 // waitForDirect blocks until a non-relayed connection to the peer exists,
 // the hole puncher reports it has run out of ideas, or the timeout
 // expires. Waiting out the full timeout on a pair that was never going to
@@ -1053,7 +1188,10 @@ func (n *Node) fetch(ctx context.Context, typed, outDir string) ([]string, error
 func (n *Node) waitForDirect(ctx context.Context, p peer.ID, timeout time.Duration) bool {
 	gaveUp := n.punch.watch(p)
 	defer n.punch.forget(p)
+	return n.waitForDirectCh(ctx, p, timeout, gaveUp)
+}
 
+func (n *Node) waitForDirectCh(ctx context.Context, p peer.ID, timeout time.Duration, gaveUp <-chan struct{}) bool {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	poll := time.NewTicker(250 * time.Millisecond)

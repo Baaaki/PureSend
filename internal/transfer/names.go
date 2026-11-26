@@ -45,6 +45,9 @@ func checkManifest(outDir string, m Manifest) ([]string, error) {
 	}
 
 	targets := make([]string, len(m.Files))
+	seenFiles := make(map[string]bool, len(m.Files))
+	seenDirs := make(map[string]bool, len(m.Files))
+	foldCase := checkWindowsNames || runtime.GOOS == "darwin"
 	var total int64
 	for i, f := range m.Files {
 		if f.Size < 0 || f.Size > math.MaxInt64-total {
@@ -56,6 +59,30 @@ func checkManifest(outDir string, m Manifest) ([]string, error) {
 		}
 		t, err := safeJoin(outDir, f.Path)
 		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(outDir, t)
+		if err != nil {
+			return nil, err
+		}
+		key := filepath.ToSlash(rel)
+		if foldCase {
+			key = strings.ToLower(key)
+		}
+		if seenDirs[key] {
+			return invalid("conflicting file and folder paths")
+		}
+		for idx := 0; idx < len(key); idx++ {
+			if key[idx] == '/' {
+				prefix := key[:idx]
+				if seenFiles[prefix] {
+					return invalid("conflicting file and folder paths")
+				}
+				seenDirs[prefix] = true
+			}
+		}
+		seenFiles[key] = true
+		if err := checkNoLinks(outDir, t); err != nil {
 			return nil, err
 		}
 		targets[i] = t
@@ -260,6 +287,11 @@ func checkNoLinks(outDir, target string) error {
 			link, _ := filepath.Rel(outDir, dir)
 			return fmt.Errorf("refusing to save %s through the link %s in the download folder",
 				filepath.Base(target), filepath.ToSlash(link))
+		}
+		if !st.IsDir() {
+			conflict, _ := filepath.Rel(outDir, dir)
+			return fmt.Errorf("cannot create folder %s for %s: a file with that name already exists",
+				filepath.ToSlash(conflict), filepath.Base(target))
 		}
 	}
 	return nil

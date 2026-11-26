@@ -31,6 +31,12 @@ FROM alpine:3.24
 WORKDIR /data
 COPY --from=build /server /usr/local/bin/server
 
+# Nothing here needs root, and the identity key is the one secret in the
+# image's world. Create the non-root user and set ownership on /data BEFORE
+# declaring VOLUME /data — Dockerfile build steps after VOLUME do not
+# persist directory metadata changes in all builders.
+RUN adduser -D -u 10001 ft && chown ft:ft /data
+
 # The identity key is written to /data/server.key. Mount a volume here:
 # if the peer ID changes, every client already released stops working.
 VOLUME /data
@@ -46,9 +52,6 @@ EXPOSE 8080 8081
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8081/health >/dev/null || exit 1
 
-# Nothing here needs root, and the identity key is the one secret in the
-# image's world. USER comes after the VOLUME so /data is owned correctly.
-RUN adduser -D -u 10001 ft && chown ft /data
 USER ft
 
 ENTRYPOINT ["server"]
