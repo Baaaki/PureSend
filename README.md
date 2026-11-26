@@ -115,6 +115,8 @@ irm https://raw.githubusercontent.com/Baaaki/PureSend/main/install.ps1 | iex
 ```
 
 > **Portable Binaries:** Prebuilt standalone executables (`.exe`, `mac_arm64`, and `.deb`) are available directly from [GitHub Releases](https://github.com/Baaaki/PureSend/releases/latest) and the [Project Website](https://puresend.madebybaki.com/#indir).
+>
+> **Uninstall:** PureSend creates no background services, registry entries, or configuration files. Delete the standalone binary, or remove `%LOCALAPPDATA%\PureSend` on Windows (`Remove-Item -Recurse -Force "$env:LOCALAPPDATA\PureSend"`), `~/.local/bin/puresend` (or `/usr/local/bin/puresend`) on Linux/macOS, or run `sudo apt remove puresend` for `.deb` installs.
 
 ### Use
 

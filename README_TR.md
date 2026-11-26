@@ -115,6 +115,8 @@ irm https://raw.githubusercontent.com/Baaaki/PureSend/main/install.ps1 | iex
 ```
 
 > **Klasik İndirme:** Kurulum yapmadan taşınabilir (portable) çalıştırmak için [GitHub Releases](https://github.com/Baaaki/PureSend/releases/latest) veya [Web Sitemizden](https://puresend.madebybaki.com/#indir) doğrudan `.exe`, `mac_arm64` veya `.deb` dosyalarını indirebilirsiniz.
+>
+> **Kaldırma (Uninstall):** PureSend arka plan servisi, Windows Registry kaydı veya yapılandırma dosyası oluşturmaz. Taşınabilir ikili dosyayı doğrudan silebilir; kurulum betiğiyle kurduysanız Windows'ta `%LOCALAPPDATA%\PureSend` klasörünü (`Remove-Item -Recurse -Force "$env:LOCALAPPDATA\PureSend"`), Linux/macOS'ta `~/.local/bin/puresend` (veya `/usr/local/bin/puresend`) dosyasını kaldırabilir, `.deb` kurulumlarında ise `sudo apt remove puresend` çalıştırabilirsiniz.
 
 ### Kullanım
 
