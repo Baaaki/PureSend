@@ -17,7 +17,7 @@ require (
 	github.com/schollz/pake/v3 v3.2.0
 	go.uber.org/fx v1.24.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.50.0
 )
 
 require (
